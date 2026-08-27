@@ -8,7 +8,7 @@ The approved [product scope](../../../../docs/product-scope.md) requires browser
 
 ## Proposal
 
-The maintainer selected TypeScript for the execution core and authorized the initial bootstrap. This note owns the foundation decisions, including the partially implemented bootstrap and the remaining execution contracts. The [architecture reference](../../../../docs/architecture.md) owns implemented composition, and the [development guide](../../../../docs/development.md#available-tooling) owns available setup and verification commands. The workflow proposal continues to own the reference choices, and the product scope continues to own release acceptance. This note remains proposed because the full execution and durability contracts below are not implemented.
+The maintainer selected TypeScript for the execution core and authorized the initial bootstrap. This note owns the foundation decisions, including the bootstrap, shared event schemas and pure state reduction, and the remaining execution service contracts. The [architecture reference](../../../../docs/architecture.md) owns implemented composition, the [execution-event reference](../../../../docs/execution-events.md) owns current event and reducer semantics, and the [development guide](../../../../docs/development.md#available-tooling) owns available setup and verification commands. The workflow proposal continues to own the reference choices, and the product scope continues to own release acceptance. This note remains proposed because the full execution and durability contracts below are not implemented.
 
 ### Composition and technology
 
@@ -39,55 +39,23 @@ The shared contract module contains JSON-safe schemas, inferred types, and pure 
 
 ### Identity and vocabulary
 
-| Entity | Proposed meaning |
-| --- | --- |
-| Session | A durable conversation bound to one canonical workspace root; multiple runs may belong to it |
-| Run | One accepted user submission through termination; the UI may call it a turn, but there is no separate turn state machine |
-| Step | One model request and the tools it requests; numbered monotonically within a run |
-| Model request | One logical model call identified within a step, with its effective input captured before dispatch |
-| Attempt | One actual provider attempt; initially always 1, with SDK retries disabled rather than hidden |
-| Tool call | One normalized call with a server identity and the original provider call identity retained for reply serialization |
-| Approval | One decision for exactly one tool call and its frozen arguments; never a tool-name-wide grant |
-| Command | A client-generated command identity used to recognize a repeated submission |
-
-The common event envelope contains schema_version, session_id, seq, type, recorded_at, and data. seq is a contiguous positive integer allocated transactionally within its session; (session_id, seq) is the event identity, so a second event UUID is unnecessary. Applicable records also carry run_id, step, request_id, attempt, call_id, approval_id, and command_id. Event schemas require the fields appropriate to their kind rather than allowing uncorrelated events everywhere.
-
-recorded_at is a UTC timestamp for ordering display, not a duration clock. Producers record occurrence timestamps and monotonic durations for the operations they can measure. Recovery records identify their recovery origin and do not fabricate the moment an interrupted external operation actually stopped. Unknown metrics remain null. Unknown schema versions stop writable recovery rather than being silently ignored; migration is an explicit store operation.
+The [execution-event reference](../../../../docs/execution-events.md#validation-and-ordering) owns implemented identities, ordering, and event validation. Separating a session, accepted run, model step, request attempt, tool call, approval, and command keeps state transitions attributable without deriving execution from presentation text. The common session sequence identifies a fact without an additional event UUID.
 
 ### Minimal event vocabulary
 
-These are proposed application events, not provider protocol chunks or a generated implementation catalog.
-
-| Events | Facts and required closure |
-| --- | --- |
-| session.created | Canonical workspace root and session identity |
-| run.started, user.message | One accepted command, run identity, and admitted user content, committed together |
-| step.started, step.finished | Step boundaries; settlement includes a status and reason |
-| model.request.started | Effective provider/model settings, logical messages, system instructions, tool schemas, and attempt identity; records dispatch intent, not proof the provider received bytes |
-| model.response.delta | Ordered normalized text, reasoning, or tool-call fragments for one attempt |
-| model.request.finished | One attempt's assembled response or partial prefix, stop reason, usage, timings, and success/error/cancelled/interrupted outcome |
-| tool.call.created | Fully assembled call identity and original arguments before tool-parameter validation; incomplete streamed call fragments never authorize execution |
-| approval.requested, approval.resolved | Frozen operation, deadline, policy/user decision and origin; resolution includes denial, expiry, or cancellation where applicable |
-| tool.started, tool.finished | Dispatch intent and one terminal outcome with result, error, timings, exit code, and applicable change evidence; denied calls finish without tool.started |
-| run.cancel_requested | Durable cancellation intent, distinct from successful process cleanup |
-| run.finished | Exactly one terminal run status and reason, after its open child operations are settled |
-
-The final request record is authoritative for settled output and usage. Deltas provide live and interrupted-prefix presentation, but finalization replaces that partial presentation rather than appending duplicate text or summing the same usage twice. Tool-call fragments become executable calls only after a complete valid response; validation failures are recorded without dispatch. Capture model input after context assembly, so Trace does not substitute the raw user prompt for the actual request.
+The shared schemas cover the lifecycle vocabulary needed by the first release. Their shapes and inferred types have one owner in the [contract module](../../../../packages/contracts/src/index.ts), while the [retained-output rules](../../../../docs/execution-events.md#retained-output-and-measurements) define how consumers select final output and preserve unknown metrics. Producers, payload storage, masking markers, provider serialization, and the complete Trace projection remain dependent work; schema parsing does not prove those facts were captured correctly.
 
 ### State transitions and invariants
 
-| Object | Proposed transitions |
-| --- | --- |
-| Session activity | idle -> running -> idle; waiting_for_approval and cancelling are activity projections of its active run |
-| Run | running <-> waiting_for_approval; either -> cancelling; normal settlement -> completed or failed; cancelling -> cancelled after cleanup, or failed on cleanup failure; restart settlement -> interrupted |
-| Tool | created -> waiting_for_approval when gated -> running -> succeeded/failed/cancelled; denial/expiry -> denied; recovery -> interrupted |
-| Approval | pending -> allowed/denied/expired/cancelled; no transition back to pending |
+The [pure reducer](../../../../docs/execution-events.md#lifecycle-boundary) enforces ordered parent/child lifecycles, single-run admission, sequential model/tool dispatch, frozen approvals, and cancellation barriers. It rejects invalid canonical histories rather than silently treating corrupt facts as transport duplicates. Only explicit child terminal facts settle children, and only run.finished ends a run, so failures and cancellation can still be followed by truthful cleanup records.
 
-One run is active per session, and tools execute sequentially initially. A new submission while that session is busy returns a conflict rather than creating an input queue. A model failure ends the run; an ordinary tool failure becomes a model-visible tool result so the loop can continue within its limits. A completed run means the loop produced its terminal answer, not that external acceptance tests necessarily passed.
+The reducer does not execute operations or create recovery events. It retains the final response separately from streamed prefixes so consumers can avoid duplicate output or usage. Per-run maps avoid prototype-key collisions, and immutable updates keep replay from rewriting earlier projections. These choices require event storage and transport to preserve the same identities and ordering.
 
-Mutations and callbacks are serialized per session. Late completions after a terminal boundary cannot reopen a run, settle it twice, or start another tool. Cancellation and approval use the same serialization boundary, and permission is checked again at dispatch. If cancellation wins before dispatch, an earlier allowance does not launch the operation. After dispatch, cancellation concerns cleanup and cannot undo effects already produced.
+### Execution service obligations
 
-When cancellation is accepted, commit the intent, resolve pending approvals as cancelled, stop provider reads, and terminate the owned subprocess group. Report cancelled only after the supported runner confirms cleanup. A cleanup failure is explicit and prevents new writes in that workspace until resolved. [Node's child-process API](https://nodejs.org/api/child_process.html) supplies process operations and cancellation signals; group ownership, bounded output draining, termination escalation, and waiting for actual exit require our implementation and tests. Aborting a Promise or receiving an AbortError does not by itself establish process cleanup.
+Mutations and callbacks still need a per-session serializer in the future command service. A new submission while the session is busy must return a conflict rather than create an input queue. Permission must be checked again at dispatch; the reducer's validation is not operating-system confinement or a replacement for the tool runner.
+
+When cancellation is accepted, the service must commit intent, resolve pending approvals as cancelled, stop provider reads, and terminate the owned subprocess group. Report cancelled only after the supported runner confirms cleanup. A cleanup failure must prevent new writes in the affected workspace until resolved; persistent workspace admission blocking is not implemented by the in-memory reducer. [Node's child-process API](https://nodejs.org/api/child_process.html) supplies process operations and cancellation signals; group ownership, bounded output draining, termination escalation, and waiting for actual exit require runner implementation and tests. Aborting a Promise or receiving an AbortError does not establish process cleanup.
 
 ### Durable ordering and external effects
 
@@ -135,7 +103,7 @@ The initial loop limit is 32 steps per run. Provider requests and shell calls ha
 
 ### Confirmation and remaining decisions
 
-The bootstrap establishes TypeScript, Node 24, npm workspaces, shared Zod validation, React/Vite bundling, Vitest, and a better-sqlite3 worker probe on Linux. Fastify is a locked dependency but has no implemented HTTP service, and Playwright is not installed. Execution contracts, limits, approval policy, recovery, and browser transport remain proposals for their dependent slices. The first real provider and model remain unselected; credentials are unnecessary for bootstrap. Confirm that provider before its integration slice, and keep API keys out of repository documents and conversation output.
+The bootstrap establishes TypeScript, Node 24, npm workspaces, shared Zod validation, React/Vite bundling, Vitest, and a better-sqlite3 worker probe on Linux. Fastify is a locked dependency but has no implemented HTTP service, and Playwright is not installed. The event vocabulary and pure transition rules are effective in memory; durable command admission, runtime limits, producing and enforcing approval decisions, recovery, and browser transport remain proposals for their dependent slices. The first real provider and model remain unselected; credentials are unnecessary for bootstrap. Confirm that provider before its integration slice, and keep API keys out of repository documents and conversation output.
 
 ## Alternatives considered
 
@@ -181,3 +149,5 @@ Committed streaming trades latency and disk traffic for faithful reopening. Full
 The store cannot transactionally control external effects. Unknown outcomes, residual processes, and concurrent user edits must stay visible instead of being hidden behind a completed flag. Secret masking may change retained context and must remain observable; it cannot guarantee removal of unknown secrets.
 
 Bootstrap verification covers clean installation from the lockfile on Node 24.20.0/npm 10.9.8, strict type checking, browser production bundling, shared-schema rejection tests, and a native SQLite worker using a temporary file database. Storage tests cover batch rollback, sequence continuity, reopening committed records, repeated open/close boundaries, and worker error/exit rejection. The standalone probe reports one appended and read event. Dependency installation requires native addon access, and this WSL shell needs a writable Linux TMPDIR for tests. These checks do not establish crash durability, production queue bounds, command idempotency, HTTP security, browser interaction, recovery, performance, or live provider acceptance; those obligations remain in the dependent slices.
+
+Event/reducer verification uses the same Node 24 environment and covers complete lifecycle fixtures, runtime schema rejection, command and parent correlation, frozen operation checks, cancellation/approval races, child failure closure, late and duplicate terminal facts, explicit recovery provenance, and immutable replay with authoritative final output and unknown metrics. The browser probe imports the event union without core/server dependencies, and the original SQLite probe remains compatible. This is slice-2 evidence, not implementation of the pending command service, durable execution store, recovery runner, or product acceptance workflow.

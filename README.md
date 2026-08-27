@@ -4,7 +4,7 @@ A coding agent project developed by a single maintainer.
 
 Document type: reference.
 
-The current implementation is a TypeScript bootstrap with shared-contract and SQLite worker probes. It does not yet run coding tasks. See the [architecture reference](docs/architecture.md) for implemented boundaries.
+The current implementation provides TypeScript event contracts, pure execution-state reduction, and browser/SQLite worker probes. It does not yet run coding tasks. See the [architecture reference](docs/architecture.md) for implemented boundaries.
 
 ## Start here
 

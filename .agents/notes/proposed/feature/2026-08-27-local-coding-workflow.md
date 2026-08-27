@@ -40,7 +40,7 @@ The public reference is DeepSeek Harness at revision `b150a551b8d465e31e418e1b2e
 
 ### Decisions still required
 
-The [execution foundations proposal](../architecture/2026-08-27-execution-foundations.md#confirmation-and-remaining-decisions) records the selected core language and presents the remaining stack, identities, state transitions, persistence and reconnect contracts, local execution boundaries, and initial limits for maintainer confirmation. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
+The [execution foundations proposal](../architecture/2026-08-27-execution-foundations.md#confirmation-and-remaining-decisions) records the effective foundation decisions and the remaining persistence, reconnect, execution-service, and limit proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
 
 ## Alternatives considered
 
@@ -60,7 +60,7 @@ Implementation acceptance is defined solely by the [workflow and failure-path ch
 
 ### Verification sequence
 
-The [implementation slices](../architecture/2026-08-27-execution-foundations.md#implementation-slices) define dependency order and observable evidence from bootstrap through real-provider acceptance. They are planned checks, not existing commands or passing tests. The scope document remains the owner of product acceptance.
+The [implementation slices](../architecture/2026-08-27-execution-foundations.md#implementation-slices) define dependency order and observable evidence from bootstrap through real-provider acceptance. The foundation note records verified slice evidence, and the [development guide](../../../../docs/development.md#available-tooling) owns available commands. Passing foundation checks does not satisfy the complete product workflow; the scope document remains the owner of release acceptance.
 
 ## Risks
 

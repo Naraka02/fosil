@@ -1,4 +1,4 @@
-import { sessionCreatedEventSchema } from "@fosil/contracts";
+import { eventSchema } from "@fosil/contracts";
 
 const probeEvent = {
   schema_version: 1,
@@ -10,6 +10,7 @@ const probeEvent = {
 } as const;
 
 export function App() {
-  const result = sessionCreatedEventSchema.safeParse(probeEvent);
-  return <main><h1>Fosil bootstrap probe</h1><p>Shared contract: {result.success ? "accepted" : "rejected"}</p></main>;
+  const result = eventSchema.safeParse(probeEvent);
+  const unknownVersion = eventSchema.safeParse({ ...probeEvent, schema_version: 2 });
+  return <main><h1>Fosil contract probe</h1><p>Shared contract: {result.success ? "accepted" : "rejected"}</p><p>Unknown schema version: {unknownVersion.success ? "accepted" : "rejected"}</p></main>;
 }
