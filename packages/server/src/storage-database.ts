@@ -62,6 +62,8 @@ export class StorageDatabase {
 
   get recovery(): RecoveryReport { return this.recoveryReport; }
 
+  get protectedFiles(): string[] { return [this.db.name, `${this.db.name}-wal`, `${this.db.name}-shm`, `${this.db.name}-journal`]; }
+
   static open(path: string): StorageDatabase {
     const db = new Database(canonicalDatabasePath(path), { timeout: 0 });
     try {

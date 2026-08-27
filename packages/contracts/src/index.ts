@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+export { fileToolInvocationSchema, parseFileToolInvocation, fileToolRequiresApproval, fileToolDefinitions } from "./file-tools.js";
+export type { FileToolInvocation } from "./file-tools.js";
+
 const isoTimestamp = z.iso.datetime({ offset: false });
 const id = z.string().min(1);
 const positiveInt = z.number().int().positive();

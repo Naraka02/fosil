@@ -6,7 +6,9 @@ This reference owns durable storage, command acceptance, and the worker boundary
 
 ## Store interface
 
-[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `readPage`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions; there is no background execution loop or provider/tool dispatch. Open includes the [startup recovery barrier](recovery.md#startup-admission) and returns its report.
+[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `readPage`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions without a background execution loop or provider/tool dispatch. The separate [file-tool service](file-tools.md) owns direct file effects. Open includes the [startup recovery barrier](recovery.md#startup-admission) and returns its report.
+
+After successful open, the server-only `protectedFiles` getter returns a detached list of the canonical database path and SQLite sidecar paths. It performs no filesystem I/O and rejects access before open or after close. File tools use it to reject active storage targets before opening them; it is not a public payload or browser API.
 
 `execute` is the command acceptance boundary. `append` and `appendBatch` are trusted internal interfaces for producers and fixtures: they enforce event shape and lifecycle, but do not manufacture command receipts, authorize filesystem access, or verify that reported effects occurred. They must not be exposed directly as browser mutation endpoints. In particular, a raw `session.created` append checks workspace syntax only; session creation through `execute` checks and pins the actual directory.
 
@@ -37,7 +39,7 @@ Receipt lookup precedes current admission checks and filesystem resolution. An e
 
 An acknowledgement identifies the command, session, optional run, and inclusive committed sequence range. It is returned only after the transaction commits. It means the action was accepted durably, not that execution finished. The receipt and its acceptance events are one transaction, including when receipt insertion fails. Retry suppression does not guarantee exactly-once external effects.
 
-Cancellation records intent only. It does not close a child, kill a process, or resolve a pending approval. Approval commands check the wall-clock deadline at decision admission, but there is no expiry timer; an expired decision is rejected without generating an expiry event. A producer must explicitly append the appropriate child settlements. Repeated allowed/denied responses with a new command identity are rejected after settlement, and an accepted cancellation defeats a later allowance.
+Cancellation records intent only. It does not close a child, kill a process, or resolve a pending approval. Approval commands check the wall-clock deadline at decision admission, but there is no expiry timer; an expired decision is rejected without generating an expiry event. The [file-tool service](file-tools.md#approval-and-cancellation) produces its corresponding settlements during advancement; command acceptance alone does not drive that service. Repeated allowed/denied responses with a new command identity are rejected after settlement, and an accepted cancellation defeats a later allowance.
 
 ## Transaction and payload format
 

@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the shared event contract and pure execution-state reduction boundary. The [contract schemas](../packages/contracts/src/index.ts) own event shapes and inferred TypeScript types, and the [core entry point](../packages/core/src/index.ts) exposes state reduction. The [architecture reference](architecture.md) owns package composition; the [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and the remaining service, storage, and recovery design.
+This reference owns the shared event contract and pure execution-state reduction boundary. The [contract schemas](../packages/contracts/src/index.ts) own event shapes and inferred TypeScript types, and the [core entry point](../packages/core/src/index.ts) exposes state reduction. The [architecture reference](architecture.md) owns package composition; the [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and the remaining execution-service and release requirements.
 
 ## Validation and ordering
 
@@ -38,13 +38,13 @@ Model input records contain the effective provider/model identity, system instru
 
 Deltas describe an unfinished response. State retains the delta prefix and assembled output separately; once `output` is non-null, consumers use it as the authoritative response instead of appending it to `deltaText` or `deltaReasoning`. Usage belongs to the settled request and is not added again during replay. Unknown usage or timing is `null`, not zero; durations describe observed boundaries rather than a provider's internal token timing.
 
-Payload validation does not identify secrets, prove that a snapshot is complete, or establish that reported tool evidence matches real filesystem effects. The producing service remains responsible for those facts and for the [product data boundary](product-scope.md#data-boundary). Workspace path validation remains a syntax check, not filesystem admission or authorization.
+Payload validation does not identify secrets, prove that a snapshot is complete, or establish that reported tool evidence matches real filesystem effects. The [file-tool service](file-tools.md#managed-replacement-and-evidence) produces bounded managed-edit evidence. Producers remain responsible for those facts and for the [product data boundary](product-scope.md#data-boundary). Workspace path validation remains a syntax check, not filesystem admission or authorization.
 
 ## Side effects and compatibility
 
 Reduction is deterministic and does not mutate its input state or dispatch a provider, tool, filesystem operation, or timer. It projects admitted facts; it cannot prove real subprocess cleanup, enforce a wall-clock approval deadline, or perform startup recovery.
 
-The [recovery reference](recovery.md) owns pure recovery planning, model-history projection, and store admission blocking after uncertain tool outcomes or cleanup failure. Actual process cleanup, a blocker-resolution mechanism, payload retention budgets, public payload-reference formats, masking/truncation metadata, and secret masking remain service work. The current contracts are not evidence of an exact-request trace capture pipeline.
+The [recovery reference](recovery.md) owns pure recovery planning, model-history projection, and store admission blocking after uncertain tool outcomes or cleanup failure. Actual process cleanup, a blocker-resolution mechanism, payload retention budgets, public payload-reference formats, shared payload masking/truncation metadata, and secret masking remain service work. File-tool-specific preview flags and retained evidence are defined by the [file-tool reference](file-tools.md#tools-and-retained-results). The current contracts are not evidence of an exact-request trace capture pipeline.
 
 The [event store](event-store.md) persists the execution vocabulary, validates transitions inside a transaction, and accepts idempotent commands. Its private payload references hydrate back into the shared event contract. The browser probe consumes the shared event union without importing core or server; it is not a Chat or Trace interface.
 

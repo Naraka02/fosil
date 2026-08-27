@@ -19,6 +19,7 @@ export class SqliteWorkerStore {
   private closed = false;
   private closing: Promise<void> | undefined;
   private pendingBytes = 0;
+  private storagePaths: string[] | undefined;
   private readonly pending = new Map<number, { bytes: number; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 
   constructor(workerUrl: URL = new URL("./storage-worker.js", import.meta.url), options: StoreOptions = {}) {
@@ -50,7 +51,16 @@ export class SqliteWorkerStore {
     this.worker.on("exit", (code) => this.fail(new StoreError("worker_exit", `SQLite worker exited with code ${code}`)));
   }
 
-  async open(path: string): Promise<RecoveryReport> { return await this.call({ type: "open", path }) as RecoveryReport; }
+  async open(path: string): Promise<RecoveryReport> {
+    const result = await this.call({ type: "open", path }) as { recovery: RecoveryReport; protectedFiles: string[] };
+    this.storagePaths = result.protectedFiles;
+    return result.recovery;
+  }
+
+  get protectedFiles(): readonly string[] {
+    if (this.closed || !this.storagePaths) throw new StoreError("not_open", "SQLite store is not available");
+    return [...this.storagePaths];
+  }
 
   async append(event: EventInput): Promise<Event> { return (await this.appendBatch([event]))[0]!; }
 

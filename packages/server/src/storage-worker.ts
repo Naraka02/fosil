@@ -18,7 +18,7 @@ function dispatch(message: WorkerRequest): unknown {
     case "open":
       if (database) throw new StoreError("already_open", "SQLite worker is already open");
       database = StorageDatabase.open(message.path);
-      return database.recovery;
+      return { recovery: database.recovery, protectedFiles: database.protectedFiles };
     case "append_batch": return requireDatabase().appendBatch(message.events);
     case "command": return requireDatabase().execute(message.command);
     case "read": return requireDatabase().read(message.sessionId);
