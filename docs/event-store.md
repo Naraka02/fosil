@@ -1,0 +1,62 @@
+# Event store and command acceptance
+
+Document type: reference.
+
+This reference owns durable storage, command acceptance, and the worker boundary. The [shared schemas](../packages/contracts/src/index.ts) own command and acknowledgement shapes; the [execution-event reference](execution-events.md) owns event and reducer semantics. The [architecture reference](architecture.md) owns composition, and the [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and remaining service decisions.
+
+## Store interface
+
+[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions; there is no background execution loop or provider/tool dispatch.
+
+`execute` is the command acceptance boundary. `append` and `appendBatch` are trusted internal interfaces for producers and fixtures: they enforce event shape and lifecycle, but do not manufacture command receipts, authorize filesystem access, or verify that reported effects occurred. They must not be exposed directly as browser mutation endpoints. In particular, a raw `session.created` append checks workspace syntax only; session creation through `execute` checks and pins the actual directory.
+
+`read(sessionId)` returns the complete hydrated, validated event history in sequence order. `getSession(sessionId)` returns the workspace, latest sequence, active run identity, and activity projection, or `null` for an unknown session. An unknown session has empty history. Both operations read a consistent transaction snapshot and check the stored session index against replay. They never dispatch work. Fixed-prefix paging, listing sessions, SSE, and a separate payload-fetch endpoint are not implemented.
+
+## Commands and receipts
+
+| Command | Acceptance behavior |
+| --- | --- |
+| `session.create` | Resolve an existing workspace directory through symlinks, generate a session identity, and commit `session.created` |
+| `run.submit` | Require an idle session, generate a run identity, and commit `run.started` plus `user.message` together |
+| `run.cancel` | Require the active run without prior cancellation intent, then commit `run.cancel_requested` |
+| `approval.resolve` | Require the active run, no accepted cancellation, and a pending approval before its deadline; commit one allowed or denied resolution using the recorded call correlation |
+
+Each command carries `command_id`. Session creation uses a store-wide receipt scope; all other commands share a receipt scope keyed by session identity. The fingerprint is SHA-256 of the schema-normalized operation and payload, including the submitted workspace spelling for creation. Object property ordering does not change it; server-assigned identities, timestamps, and resolved filesystem paths are not fingerprint inputs. A retry must retain the original command payload even if two paths resolve to the same directory.
+
+Receipt lookup precedes current admission checks and filesystem resolution. An exact repeat returns the original acknowledgement, including after reopening or after the run settles, without appending another event. Reusing the same scoped identity with a different payload or operation raises `command_conflict`. Rejected commands have no receipt and consume no sequence. A different submission key while a run is active raises `session_busy`; it does not enqueue another run.
+
+An acknowledgement identifies the command, session, optional run, and inclusive committed sequence range. It is returned only after the transaction commits. It means the action was accepted durably, not that execution finished. The receipt and its acceptance events are one transaction, including when receipt insertion fails. Retry suppression does not guarantee exactly-once external effects.
+
+Cancellation records intent only. It does not close a child, kill a process, or resolve a pending approval. Approval commands check the wall-clock deadline at decision admission, but there is no expiry timer; an expired decision is rejected without generating an expiry event. A producer must explicitly append the appropriate child settlements. Repeated allowed/denied responses with a new command identity are rejected after settlement, and an accepted cancellation defeats a later allowance.
+
+## Transaction and payload format
+
+The internal SQLite format has `user_version = 1`. `events` stores sequenced envelopes with a payload identity; `payloads` stores the complete JSON `data` object for each event; `sessions` stores the lookup projection; `command_receipts` stores fingerprints and original acknowledgements. Payload references are internal and are hydrated before returning shared `Event` values. There is no second trace history or external blob directory.
+
+A write transaction replays committed history, assigns contiguous per-session sequences, applies the pure reducer, and writes payload bodies, envelopes, and session indexes together. A batch may span sessions and is atomic. Any rejected event or failed receipt insert rolls back all of those writes. In-memory projections do not survive a transaction or need rollback repair. Reads validate event schemas, lifecycle order, and index agreement; malformed stored content stops further admission through the storage failure path.
+
+Payloads are retained as supplied after validation. The store does not silently truncate, mask, summarize, or deduplicate them. It does not implement per-session retention budgets, preview bodies, masking/truncation metadata, or configured-secret filtering. Producers must not send credentials or authentication headers; this storage boundary is not a complete trace capture or secret-removal pipeline.
+
+Empty databases are initialized transactionally. The earlier unversioned probe format and unknown versions are refused without migrating or replacing existing records. There is no migration or repair utility. Open also checks that required tables and columns exist; full-store recovery and integrity scanning are not implemented.
+
+## Ownership and filesystem boundary
+
+The worker retains an exclusive SQLite connection lock across transactions, using `locking_mode = EXCLUSIVE` and an acquired exclusive transaction before admission. A second worker or process using the same store is refused with `store_owned`, including a symlink alias. Normal close releases ownership; a process-death test verifies reopening after `SIGKILL` without a stale lock-file cleanup procedure. This use of connection-lifetime locking follows [SQLite's locking-mode contract](https://sqlite.org/pragma.html#pragma_locking_mode).
+
+All reads use the owner's connection; external SQLite readers cannot inspect the live database while it is owned. Paths must be absolute regular local files, with existing parent directories; symlinks are resolved and hard-link aliases are refused. The database and its directory must not be renamed, unlinked, replaced, or relinked while open. The store is not protected against a hostile local filesystem actor. SQLite alone manages database file descriptors while a store is open, avoiding the unrelated-descriptor close hazard described in [SQLite's corruption guidance](https://sqlite.org/howtocorrupt.html).
+
+The connection uses WAL and `synchronous = FULL`. These settings request durable commits on a functioning local filesystem; they do not prove resilience to disk faults or power loss. Keep the database on a local Linux filesystem, including Linux storage inside WSL2. Network filesystems, Windows-mounted storage, and native Windows/macOS behavior are unverified. There is no live backup API; copying an open database file alone is not a supported backup procedure.
+
+## Capacity, failure, and restart
+
+The asynchronous wrapper rejects excess work before posting it to the worker. Default limits are 64 pending requests, 8 MiB of serialized JSON per request, and 16 MiB of pending request JSON in total. `StoreOptions` can override these positive integer limits. They bound request admission, not JavaScript object overhead, total process memory, hydrated history size, or product payload-retention policy. JSON sizing and structured cloning run on the caller; large-history performance remains unmeasured.
+
+`queue_full` and `request_too_large` do not write anything. Accepted work drains before normal close, and close remains available at capacity. Concurrent close calls share one completion, and later calls are rejected. Worker errors, unexpected exits, malformed response envelopes, detected history corruption, and non-constraint SQLite failures after open reject pending work and prevent new admission. A failed open can be retried on the same still-live worker. Validation, admission conflicts, and rolled-back constraint failures do not poison an otherwise healthy store.
+
+Reopening preserves committed events and receipts but does not reconcile unfinished runs. An active run remains active and blocks a new submission; no operation is automatically resumed or repeated. Old pending approvals are not automatically cancelled by opening storage. This API is not the future startup recovery barrier and must not be wired to a runnable service without that barrier. Persistent workspace blocking after uncertain cleanup also remains unimplemented.
+
+## Verification boundary
+
+The [storage tests](../packages/server/src/store.test.ts) exercise atomic event/payload/index/receipt rollback, concurrent submissions, scoped retries and conflicts, approval/cancellation admission, full lifecycle readback, corruption rejection, capacity limits, worker failures, second-process refusal, and committed receipt readback after process death. The standalone SQLite probe remains a native-driver smoke check. The [development guide](development.md#setup-and-verification-procedure) owns commands and environment requirements.
+
+These tests use deterministic event producers and temporary databases, not a real model or shell runner. Process death after a committed acknowledgement is not a kill during SQLite commit, and it does not prove recovery of in-flight external effects, full disk handling, power-loss durability, or the product's end-to-end acceptance conditions.

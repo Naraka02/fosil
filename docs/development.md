@@ -22,9 +22,11 @@ npm run sqlite:probe
 
 `npm ci` installs the repository lockfile without resolving a new dependency set. Installation may need network access and, when no compatible SQLite addon binary is available, native build tools. Type checking uses TypeScript project references and emits intermediate build artifacts; it is not a no-output lint command. The build also bundles the browser probe. Tests compile their prerequisites before running Vitest. Run the build before the standalone SQLite probe, which creates and removes a temporary database.
 
-The [architecture reference](architecture.md) defines what these bootstrap probes implement and what they do not. No provider credentials are needed for these checks. There is no CI workflow, browser automation suite, or complete coding-agent application yet.
+The [architecture reference](architecture.md) defines the implemented boundaries. No provider credentials are needed for these checks. There is no CI workflow, browser automation suite, or complete coding-agent application yet.
 
 On WSL, ensure `TMPDIR` names an existing, writable Linux directory. If the shell inherits an unavailable Windows temporary path, run the test and probe commands with `TMPDIR=/tmp`; no change to the system default Node installation is required.
+
+Storage ownership tests create local child processes and terminate their own fixture process. If the execution sandbox prevents observing child-process output, rerun the affected tests with the required permission; a timeout or missing result is not a passed ownership check.
 
 ## Working sequence
 

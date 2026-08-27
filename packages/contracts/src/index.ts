@@ -215,3 +215,23 @@ export type Timing = z.infer<typeof timingSchema>;
 
 export function parseEvent(value: unknown): Event { return eventSchema.parse(value); }
 export function parseEventInput(value: unknown): EventInput { return eventInputSchema.parse(value); }
+
+/** User commands contain no server-assigned identities or timestamps. */
+export const commandSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("session.create"), command_id: id, workspace_root: absolutePath }).strict(),
+  z.object({ type: z.literal("run.submit"), command_id: id, session_id: id, content: z.string().min(1) }).strict(),
+  z.object({ type: z.literal("run.cancel"), command_id: id, session_id: id, run_id: id }).strict(),
+  z.object({
+    type: z.literal("approval.resolve"), command_id: id, session_id: id, run_id: id,
+    approval_id: id, decision: z.enum(["allow", "deny"])
+  }).strict()
+]);
+
+export const commandAckSchema = z.object({
+  command_id: id, session_id: id, run_id: id.nullable(),
+  first_seq: positiveInt, last_seq: positiveInt
+}).strict().refine((value) => value.last_seq >= value.first_seq, "invalid committed sequence range");
+
+export type Command = z.infer<typeof commandSchema>;
+export type CommandAck = z.infer<typeof commandAckSchema>;
+export function parseCommand(value: unknown): Command { return commandSchema.parse(value); }

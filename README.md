@@ -4,7 +4,7 @@ A coding agent project developed by a single maintainer.
 
 Document type: reference.
 
-The current implementation provides TypeScript event contracts, pure execution-state reduction, and browser/SQLite worker probes. It does not yet run coding tasks. See the [architecture reference](docs/architecture.md) for implemented boundaries.
+The current implementation provides TypeScript contracts, pure execution-state reduction, transactional event storage with command acceptance, and a browser contract probe. It does not yet run coding tasks. See the [architecture reference](docs/architecture.md) for implemented boundaries.
 
 ## Start here
 

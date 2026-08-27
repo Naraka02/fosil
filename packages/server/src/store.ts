@@ -1,92 +1,115 @@
 import { Worker } from "node:worker_threads";
-import type { SessionCreatedEvent, SessionCreatedEventInput } from "@fosil/contracts";
+import { commandAckSchema, parseEvent, type Command, type CommandAck, type Event, type EventInput } from "@fosil/contracts";
+import { isWorkerResponse, StoreError, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
 
-type WorkerCommand =
-  | { type: "open"; path: string }
-  | { type: "append"; event: SessionCreatedEventInput }
-  | { type: "append_batch"; events: SessionCreatedEventInput[] }
-  | { type: "read"; sessionId: string }
-  | { type: "close" };
-type WorkerRequest = WorkerCommand & { id: number };
+export type StoreEvent = Event;
+export { StoreError } from "./storage-protocol.js";
+export type { SessionSummary } from "./storage-protocol.js";
 
-type WorkerResponse = {
-  id: number;
-  ok: boolean;
-  value?: unknown;
-  error?: string;
-};
-
-export type StoreEvent = SessionCreatedEvent;
+export interface StoreOptions {
+  maxPending?: number;
+  maxRequestBytes?: number;
+  maxPendingBytes?: number;
+}
 
 export class SqliteWorkerStore {
   private readonly worker: Worker;
+  private readonly limits: Required<StoreOptions>;
   private nextId = 1;
   private closed = false;
   private closing: Promise<void> | undefined;
-  private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  private pendingBytes = 0;
+  private readonly pending = new Map<number, { bytes: number; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 
-  constructor(workerUrl: URL = new URL("./storage-worker.js", import.meta.url)) {
+  constructor(workerUrl: URL = new URL("./storage-worker.js", import.meta.url), options: StoreOptions = {}) {
+    this.limits = { maxPending: 64, maxRequestBytes: 8 * 1024 * 1024, maxPendingBytes: 16 * 1024 * 1024, ...options };
+    for (const limit of Object.values(this.limits)) {
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new StoreError("invalid_options", "Store limits must be positive safe integers");
+    }
     this.worker = new Worker(workerUrl);
-    this.worker.on("message", (message: WorkerResponse) => {
-      const operation = this.pending.get(message.id);
-      if (!operation) return;
+    this.worker.on("message", (message: unknown) => {
+      if (!isWorkerResponse(message) || !this.pending.has(message.id)) {
+        this.fail(new StoreError("worker_protocol", "Invalid SQLite worker response"));
+        void this.worker.terminate();
+        return;
+      }
+      const operation = this.pending.get(message.id)!;
       this.pending.delete(message.id);
+      this.pendingBytes -= operation.bytes;
       if (message.ok) operation.resolve(message.value);
-      else operation.reject(new Error(message.error ?? "SQLite worker operation failed"));
+      else {
+        const error = new StoreError(message.error.code, message.error.message);
+        operation.reject(error);
+        if (message.fatal) {
+          this.fail(error);
+          void this.worker.terminate();
+        }
+      }
     });
-    this.worker.on("error", (error) => {
-      this.closed = true;
-      for (const operation of this.pending.values()) operation.reject(error);
-      this.pending.clear();
-    });
-    this.worker.on("exit", (code) => {
-      this.closed = true;
-      if (this.pending.size === 0) return;
-      const error = new Error(`SQLite worker exited with code ${code}`);
-      for (const operation of this.pending.values()) operation.reject(error);
-      this.pending.clear();
-    });
+    this.worker.on("error", (error) => this.fail(error));
+    this.worker.on("exit", (code) => this.fail(new StoreError("worker_exit", `SQLite worker exited with code ${code}`)));
   }
 
-  async open(path: string): Promise<void> {
-    await this.call({ type: "open", path });
+  async open(path: string): Promise<void> { await this.call({ type: "open", path }); }
+
+  async append(event: EventInput): Promise<Event> { return (await this.appendBatch([event]))[0]!; }
+
+  async appendBatch(events: readonly EventInput[]): Promise<Event[]> {
+    const result = await this.call({ type: "append_batch", events });
+    return (result as unknown[]).map(parseEvent);
   }
 
-  async append(event: SessionCreatedEventInput): Promise<StoreEvent> {
-    return await this.call({ type: "append", event }) as StoreEvent;
+  async execute(command: Command): Promise<CommandAck> {
+    return commandAckSchema.parse(await this.call({ type: "command", command }));
   }
 
-  async appendBatch(events: SessionCreatedEventInput[]): Promise<StoreEvent[]> {
-    return await this.call({ type: "append_batch", events }) as StoreEvent[];
+  async read(sessionId: string): Promise<Event[]> {
+    const result = await this.call({ type: "read", sessionId });
+    return (result as unknown[]).map(parseEvent);
   }
 
-  async read(sessionId: string): Promise<StoreEvent[]> {
-    return await this.call({ type: "read", sessionId }) as StoreEvent[];
+  async getSession(sessionId: string): Promise<SessionSummary | null> {
+    return await this.call({ type: "session", sessionId }) as SessionSummary | null;
   }
 
   close(): Promise<void> {
     if (this.closing) return this.closing;
-    const request = this.closed ? Promise.resolve() : this.call({ type: "close" });
+    // Closing must drain accepted work even when normal admission is at capacity.
+    const request = this.closed ? Promise.resolve() : this.call({ type: "close" }, true);
     this.closed = true;
     this.closing = (async () => {
-      try {
-        await request;
-      } finally {
-        await this.worker.terminate();
-      }
+      try { await request; }
+      finally { await this.worker.terminate(); }
     })();
     return this.closing;
   }
 
-  private call(request: WorkerCommand): Promise<unknown> {
-    if (this.closed) return Promise.reject(new Error("SQLite worker is closed"));
-    const id = this.nextId++;
+  private fail(error: Error): void {
+    this.closed = true;
+    for (const operation of this.pending.values()) operation.reject(error);
+    this.pending.clear();
+    this.pendingBytes = 0;
+  }
+
+  private call(request: WorkerCommand, closing = false): Promise<unknown> {
+    if (this.closed) return Promise.reject(new StoreError("closed", "SQLite worker is closed"));
+    if (!closing && this.pending.size >= this.limits.maxPending) return Promise.reject(new StoreError("queue_full", "SQLite worker queue is full"));
+    let snapshot: WorkerRequest;
+    let bytes: number;
+    try {
+      const serialized = JSON.stringify({ ...request, id: this.nextId++ });
+      bytes = Buffer.byteLength(serialized);
+      if (!closing && bytes > this.limits.maxRequestBytes) throw new StoreError("request_too_large", "SQLite worker request exceeds its byte limit");
+      if (!closing && bytes + this.pendingBytes > this.limits.maxPendingBytes) throw new StoreError("queue_full", "SQLite worker byte budget is full");
+      snapshot = structuredClone({ ...request, id: this.nextId - 1 });
+    } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      try {
-        this.worker.postMessage({ id, ...request } satisfies WorkerRequest);
-      } catch (error) {
-        this.pending.delete(id);
+      this.pending.set(snapshot.id, { bytes, resolve, reject });
+      this.pendingBytes += bytes;
+      try { this.worker.postMessage(snapshot); }
+      catch (error) {
+        this.pending.delete(snapshot.id);
+        this.pendingBytes -= bytes;
         reject(error);
       }
     });

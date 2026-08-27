@@ -44,8 +44,8 @@ Payload validation does not identify secrets, prove that a snapshot is complete,
 
 Reduction is deterministic and does not mutate its input state or dispatch a provider, tool, filesystem operation, or timer. It projects admitted facts; it cannot prove real subprocess cleanup, enforce a wall-clock approval deadline, or perform startup recovery.
 
-Persistent workspace quarantine after cleanup failure, payload retention/reference formats, masking/truncation metadata, and actual secret masking remain service and storage work. The current contracts are not evidence of an exact-request trace capture pipeline.
+Persistent workspace quarantine after cleanup failure, payload retention budgets, public payload-reference formats, masking/truncation metadata, and actual secret masking remain service work. The current contracts are not evidence of an exact-request trace capture pipeline.
 
-The SQLite bootstrap still supports only `session.created` records. It does not yet persist or admit the complete execution vocabulary, enforce command idempotency, or run the reducer within a transaction. Those are separate storage and command-service work. The browser probe consumes the shared event union without importing core or server; it is not a Chat or Trace interface.
+The [event store](event-store.md) persists the execution vocabulary, validates transitions inside a transaction, and accepts idempotent commands. Its private payload references hydrate back into the shared event contract. The browser probe consumes the shared event union without importing core or server; it is not a Chat or Trace interface.
 
-The [development guide](development.md#setup-and-verification-procedure) owns verification commands. Schema and reducer tests cover valid histories and rejected boundary cases; the existing storage tests remain a compatibility check. These tests do not satisfy the [real coding workflow acceptance conditions](product-scope.md#acceptance-conditions).
+The [development guide](development.md#setup-and-verification-procedure) owns verification commands. Schema and reducer tests cover valid histories and rejected boundary cases; storage tests exercise durable admission and replay through the same rules. These tests do not satisfy the [real coding workflow acceptance conditions](product-scope.md#acceptance-conditions).

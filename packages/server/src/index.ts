@@ -1,2 +1,2 @@
-export { SqliteWorkerStore } from "./store.js";
-export type { StoreEvent } from "./store.js";
+export { SqliteWorkerStore, StoreError } from "./store.js";
+export type { StoreEvent, StoreOptions, SessionSummary } from "./store.js";
