@@ -235,3 +235,20 @@ export const commandAckSchema = z.object({
 export type Command = z.infer<typeof commandSchema>;
 export type CommandAck = z.infer<typeof commandAckSchema>;
 export function parseCommand(value: unknown): Command { return commandSchema.parse(value); }
+
+export const historyCursorSchema = z.object({
+  session_id: id, after: nonnegativeInt, through: nonnegativeInt
+}).strict().refine((cursor) => cursor.after <= cursor.through, "cursor exceeds its fixed prefix");
+export const historyPageRequestSchema = z.object({
+  session_id: id, cursor: historyCursorSchema.optional(), limit: positiveInt.max(200).default(100)
+}).strict().refine((request) => !request.cursor || request.cursor.session_id === request.session_id, "cursor belongs to another session");
+export const historyPageSchema = z.object({
+  session_id: id, events: z.array(eventSchema), cursor: historyCursorSchema, done: z.boolean()
+}).strict().refine((page) => page.session_id === page.cursor.session_id
+  && page.done === (page.cursor.after === page.cursor.through)
+  && page.events.every((event, index) => event.session_id === page.session_id && event.seq <= page.cursor.through
+    && (index === 0 || event.seq === page.events[index - 1]!.seq + 1))
+  && (page.events.length === 0 || page.events.at(-1)!.seq === page.cursor.after), "inconsistent history page");
+export type HistoryCursor = z.infer<typeof historyCursorSchema>;
+export type HistoryPageRequest = z.input<typeof historyPageRequestSchema>;
+export type HistoryPage = z.infer<typeof historyPageSchema>;

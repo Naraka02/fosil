@@ -6,18 +6,28 @@ This reference owns durable storage, command acceptance, and the worker boundary
 
 ## Store interface
 
-[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions; there is no background execution loop or provider/tool dispatch.
+[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `readPage`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions; there is no background execution loop or provider/tool dispatch. Open includes the [startup recovery barrier](recovery.md#startup-admission) and returns its report.
 
 `execute` is the command acceptance boundary. `append` and `appendBatch` are trusted internal interfaces for producers and fixtures: they enforce event shape and lifecycle, but do not manufacture command receipts, authorize filesystem access, or verify that reported effects occurred. They must not be exposed directly as browser mutation endpoints. In particular, a raw `session.created` append checks workspace syntax only; session creation through `execute` checks and pins the actual directory.
 
-`read(sessionId)` returns the complete hydrated, validated event history in sequence order. `getSession(sessionId)` returns the workspace, latest sequence, active run identity, and activity projection, or `null` for an unknown session. An unknown session has empty history. Both operations read a consistent transaction snapshot and check the stored session index against replay. They never dispatch work. Fixed-prefix paging, listing sessions, SSE, and a separate payload-fetch endpoint are not implemented.
+`read(sessionId)` returns the complete hydrated, validated event history in sequence order. `getSession(sessionId)` returns the workspace, latest sequence, active run identity, and activity projection, or `null` for an unknown session. An unknown session has empty history. Both operations read a consistent transaction snapshot and check the stored session index against replay. They never dispatch work. Listing sessions, SSE, and a separate payload-fetch endpoint are not implemented.
+
+## Fixed-prefix history paging
+
+`readPage({ session_id, cursor?, limit? })` returns ordered hydrated events, a continuation cursor, and `done`. The [shared paging schemas](../packages/contracts/src/index.ts) own request, cursor, and response validation. With no cursor, the worker fixes `through` to the latest committed sequence in that read transaction and begins after sequence zero. The default limit is 100 events; valid limits are integers from 1 through 200.
+
+A cursor binds `session_id`, the last returned sequence `after`, and the fixed high-water sequence `through`. Continuation reads return only `after < seq <= through`. New writes and startup recovery may extend the session while paging, but do not change that prefix. Repeating the same cursor and limit returns the same events. Completion means `after === through`; another read at that completed cursor returns an empty page. Start without a cursor to capture a newer prefix.
+
+The worker rejects mismatched session identities, non-integer or negative positions, reversed ranges, and a high-water sequence beyond committed history. Paging an unknown session raises `session_not_found`. Cursors are validated positions, not signed authorization tokens. Paging checks event shapes and contiguous returned sequences; complete lifecycle validation occurs during startup and writes. Each page uses a short read transaction and the session/sequence index, without holding a database snapshot open between calls.
+
+This API bounds event count, not response bytes. Consumers must concatenate a prefix starting at sequence 1 before full replay, or apply continuation events to the matching prefix state. An isolated middle page is not a complete replay input. There is no SSE subscription or gap-repair transport implemented by this method.
 
 ## Commands and receipts
 
 | Command | Acceptance behavior |
 | --- | --- |
 | `session.create` | Resolve an existing workspace directory through symlinks, generate a session identity, and commit `session.created` |
-| `run.submit` | Require an idle session, generate a run identity, and commit `run.started` plus `user.message` together |
+| `run.submit` | Require an idle session and no overlapping workspace blocker, generate a run identity, and commit `run.started` plus `user.message` together |
 | `run.cancel` | Require the active run without prior cancellation intent, then commit `run.cancel_requested` |
 | `approval.resolve` | Require the active run, no accepted cancellation, and a pending approval before its deadline; commit one allowed or denied resolution using the recorded call correlation |
 
@@ -37,7 +47,7 @@ A write transaction replays committed history, assigns contiguous per-session se
 
 Payloads are retained as supplied after validation. The store does not silently truncate, mask, summarize, or deduplicate them. It does not implement per-session retention budgets, preview bodies, masking/truncation metadata, or configured-secret filtering. Producers must not send credentials or authentication headers; this storage boundary is not a complete trace capture or secret-removal pipeline.
 
-Empty databases are initialized transactionally. The earlier unversioned probe format and unknown versions are refused without migrating or replacing existing records. There is no migration or repair utility. Open also checks that required tables and columns exist; full-store recovery and integrity scanning are not implemented.
+Empty databases are initialized transactionally. The earlier unversioned probe format and unknown versions are refused without migrating or replacing existing records. There is no migration or repair utility. Open checks required tables and columns before [logical history recovery](recovery.md#startup-admission). Recovery uses existing version-1 events and does not change the storage layout.
 
 ## Ownership and filesystem boundary
 
@@ -53,10 +63,10 @@ The asynchronous wrapper rejects excess work before posting it to the worker. De
 
 `queue_full` and `request_too_large` do not write anything. Accepted work drains before normal close, and close remains available at capacity. Concurrent close calls share one completion, and later calls are rejected. Worker errors, unexpected exits, malformed response envelopes, detected history corruption, and non-constraint SQLite failures after open reject pending work and prevent new admission. A failed open can be retried on the same still-live worker. Validation, admission conflicts, and rolled-back constraint failures do not poison an otherwise healthy store.
 
-Reopening preserves committed events and receipts but does not reconcile unfinished runs. An active run remains active and blocks a new submission; no operation is automatically resumed or repeated. Old pending approvals are not automatically cancelled by opening storage. This API is not the future startup recovery barrier and must not be wired to a runnable service without that barrier. Persistent workspace blocking after uncertain cleanup also remains unimplemented.
+Reopening preserves committed events and receipts while settling unfinished runs through the [recovery contract](recovery.md). No operation is automatically resumed or repeated. A safely settled session can accept a new run; [workspace uncertainty](recovery.md#workspace-uncertainty) instead raises `workspace_blocked` for new runs and dispatch. There is no mechanism to clear that blocker yet.
 
 ## Verification boundary
 
-The [storage tests](../packages/server/src/store.test.ts) exercise atomic event/payload/index/receipt rollback, concurrent submissions, scoped retries and conflicts, approval/cancellation admission, full lifecycle readback, corruption rejection, capacity limits, worker failures, second-process refusal, and committed receipt readback after process death. The standalone SQLite probe remains a native-driver smoke check. The [development guide](development.md#setup-and-verification-procedure) owns commands and environment requirements.
+The [storage tests](../packages/server/src/store.test.ts) exercise atomic event/payload/index/receipt rollback, concurrent submissions, scoped retries and conflicts, approval/cancellation admission, full lifecycle readback, corruption rejection, capacity limits, worker failures, second-process refusal, and fixed-prefix paging. The [recovery reference](recovery.md#verification-and-limits) owns restart and controlled-effect evidence. The standalone SQLite probe remains a native-driver smoke check. The [development guide](development.md#setup-and-verification-procedure) owns commands and environment requirements.
 
 These tests use deterministic event producers and temporary databases, not a real model or shell runner. Process death after a committed acknowledgement is not a kill during SQLite commit, and it does not prove recovery of in-flight external effects, full disk handling, power-loss durability, or the product's end-to-end acceptance conditions.

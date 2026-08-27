@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEvent, EventReducerError, initialState, replay } from "./index.js";
+import { applyEvent, buildModelHistory, EventReducerError, initialState, planRecovery, replay, workspaceBlockers } from "./index.js";
 import { parseEvent, parseEventInput } from "@fosil/contracts";
 
 const sessionId = "session-reducer";
@@ -82,6 +82,115 @@ function toolResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("execution reducer", () => {
+  it("recovers every committed prefix without mutating facts or repeating terminal events", () => {
+    const { s, events } = gatedPrefix();
+    events.push(s.next("approval.resolved", { ...callLink, status: "allowed", reason: "completed", origin: "user" }));
+    events.push(s.next("tool.started", { ...callLink, ...operation, origin: "runner" }));
+    events.push(s.next("tool.finished", toolResult({ result: { changed: true } })));
+    events.push(s.next("step.finished", { run_id: "run-1", step: 1, status: "completed", reason: "completed" }));
+    events.push(...finalAnswer(s, "run-1", 2, "request-final"));
+    for (let length = 0; length <= events.length; length++) {
+      const prefix = events.slice(0, length);
+      const before = replay(prefix);
+      const snapshot = structuredClone(before);
+      const recovery = planRecovery(before, timestamp);
+      expect(planRecovery(before, timestamp)).toEqual(recovery);
+      const after = recovery.reduce((state, event) => applyEvent(state, { ...event, seq: state.lastSeq + 1 }), before);
+      expect(before).toEqual(snapshot);
+      expect(after.activeRunId).toBeNull();
+      expect(planRecovery(after, timestamp)).toEqual([]);
+      expect(recovery.every((event) => ["model.request.finished", "approval.resolved", "tool.finished", "step.finished", "run.finished"].includes(event.type))).toBe(true);
+      const history = buildModelHistory(after);
+      for (const message of history) {
+        if (message.role !== "assistant") continue;
+        const replies = history.filter((candidate) => candidate.role === "tool" && candidate.request_id === message.request_id);
+        expect(replies.map((reply) => reply.role === "tool" && reply.provider_call_id)).toEqual(message.output.tool_calls.map((call) => call.provider_call_id));
+      }
+    }
+  });
+
+  it("keeps interrupted stream text but never turns tool fragments into executable calls", () => {
+    const s = sequence();
+    const events = baseRun(s);
+    events.push(...modelStep(s, "run-1", 1, "request-1", output("partial")).slice(0, 3));
+    // Reuse the next contiguous sequence because the fixture builder also constructed an unused finish.
+    events.push({ ...s.next("model.response.delta", { run_id: "run-1", step: 1, request_id: "request-1", attempt: 1, delta_index: 2, delta: { kind: "tool_call", name: "write", arguments: "{unfinished" } }), seq: events.length + 1 });
+    const before = replay(events);
+    expect(() => buildModelHistory(before)).toThrow("open request");
+    const after = planRecovery(before, timestamp).reduce((state, event) => applyEvent(state, { ...event, seq: state.lastSeq + 1 }), before);
+    const request = after.runs.get("run-1")!.requests.get("request-1")!;
+    expect(request.output).toEqual({ text: "partial", reasoning: null, tool_calls: [] });
+    expect(request.usage).toEqual(usage());
+    expect(request.timings).toEqual(timings());
+    expect(request.deltas).toHaveLength(2);
+    expect(buildModelHistory(after)).toHaveLength(2);
+    const history = buildModelHistory(after);
+    const assistant = history.find((message) => message.role === "assistant")!;
+    if (assistant.role === "assistant") assistant.output.text = "consumer edit";
+    expect(request.output!.text).toBe("partial");
+  });
+
+  it("distinguishes missing dispatch, unknown outcome, and saved result in future model history", () => {
+    const { s, events } = gatedPrefix();
+    const pending = replay(events);
+    expect(() => buildModelHistory(pending)).toThrow("active tool");
+    const recover = (state: ReturnType<typeof replay>) => planRecovery(state, timestamp).reduce((current, event) => applyEvent(current, { ...event, seq: current.lastSeq + 1 }), state);
+    expect(buildModelHistory(recover(pending)).at(-1)).toMatchObject({ role: "tool", content: { execution: "not_started", provenance: "recovery" } });
+    expect(workspaceBlockers(recover(pending))).toEqual([]);
+    events.push(s.next("approval.resolved", { ...callLink, status: "allowed", reason: "completed", origin: "user" }));
+    events.push(s.next("tool.started", { ...callLink, ...operation, origin: "runner" }));
+    const interrupted = recover(replay(events));
+    expect(buildModelHistory(interrupted).at(-1)).toMatchObject({ role: "tool", content: { execution: "unknown", result: null, exit_code: null } });
+    expect(workspaceBlockers(interrupted)).toEqual([{ run_id: "run-1", call_id: "call-1", reason: "unknown_tool_outcome" }]);
+    events.push(s.next("tool.finished", toolResult({ result: { saved: true }, exit_code: 0 })));
+    const saved = recover(replay(events));
+    expect(buildModelHistory(saved).at(-1)).toMatchObject({ role: "tool", content: { execution: "settled", provenance: "recorded", result: { saved: true }, exit_code: 0 } });
+    expect(workspaceBlockers(saved)).toEqual([]);
+  });
+
+  it.each(["denied", "expired"] as const)("preserves an existing %s decision during recovery", (status) => {
+    const { s, events } = gatedPrefix();
+    events.push(s.next("approval.resolved", { ...callLink, status, reason: status, origin: status === "expired" ? "system" : "user" }));
+    const before = replay(events);
+    const after = planRecovery(before, timestamp).reduce((state, event) => applyEvent(state, { ...event, seq: state.lastSeq + 1 }), before);
+    expect(after.runs.get("run-1")!.approvals.get("approval-1")!.status).toBe(status);
+    expect(workspaceBlockers(after)).toEqual([]);
+  });
+
+  it("balances multiple declared calls without inventing missing dispatch events", () => {
+    const s = sequence();
+    const events = baseRun(s);
+    events.push(...modelStep(s, "run-1", 1, "request-1", output("", [
+      { provider_call_id: "provider-call-1", name: "read", arguments: { path: "a" } },
+      { provider_call_id: "provider-call-2", name: "read", arguments: { path: "b" } }
+    ])));
+    const call = { ...callLink, approval_id: null, tool_name: "read", cwd: "/tmp/fixture", arguments: { path: "a" } };
+    events.push(s.next("tool.call.created", { ...call, provider_call_id: "provider-call-1", requires_approval: false, origin: "provider" }));
+    events.push(s.next("tool.started", { ...call, origin: "runner" }));
+    events.push(s.next("tool.finished", toolResult({ approval_id: null, tool_name: "read", result: "saved" })));
+    const before = replay(events);
+    const recovery = planRecovery(before, timestamp);
+    const after = recovery.reduce((state, event) => applyEvent(state, { ...event, seq: state.lastSeq + 1 }), before);
+    expect(recovery.map((event) => event.type)).toEqual(["step.finished", "run.finished"]);
+    expect(buildModelHistory(after).filter((message) => message.role === "tool")).toMatchObject([
+      { provider_call_id: "provider-call-1", content: { result: "saved", provenance: "recorded" } },
+      { provider_call_id: "provider-call-2", content: { status: "not_started", result: null, execution: "not_started", provenance: "projection" } }
+    ]);
+    expect(after.runs.get("run-1")!.tools.size).toBe(1);
+  });
+
+  it("recovers cancellation intent without asserting that provider cleanup succeeded", () => {
+    const s = sequence();
+    const events = baseRun(s);
+    events.push(...modelStep(s, "run-1", 1, "request-1").slice(0, 3));
+    const running = replay(events);
+    const cancelling = applyEvent(running, nextEvent(running, "run.cancel_requested", { run_id: "run-1", command_id: "cancel", origin: "user" }));
+    const recovery = planRecovery(cancelling, timestamp);
+    const after = recovery.reduce((state, event) => applyEvent(state, { ...event, seq: state.lastSeq + 1 }), cancelling);
+    expect(after.runs.get("run-1")).toMatchObject({ status: "interrupted", cancelRequested: true });
+    expect(recovery.every((event) => event.type !== "run.cancel_requested")).toBe(true);
+    expect(workspaceBlockers(after)).toEqual([]);
+  });
   it("replays a successful multi-step run and permits the next run", () => {
     const s = sequence(); const events = baseRun(s);
     events.push(...modelStep(s, "run-1", 1, "request-1", output("", [{ provider_call_id: "provider-call-1", name: "read", arguments: {} }])), s.next("tool.call.created", { run_id: "run-1", step: 1, request_id: "request-1", attempt: 1, call_id: "call-1", provider_call_id: "provider-call-1", tool_name: "read", arguments: {}, cwd: "/tmp/fixture", requires_approval: false, approval_id: null, origin: "provider" }), s.next("tool.started", { run_id: "run-1", step: 1, request_id: "request-1", attempt: 1, call_id: "call-1", approval_id: null, tool_name: "read", arguments: {}, cwd: "/tmp/fixture", origin: "runner" }), s.next("tool.finished", { run_id: "run-1", step: 1, request_id: "request-1", attempt: 1, call_id: "call-1", approval_id: null, tool_name: "read", cwd: "/tmp/fixture", status: "succeeded", reason: "completed", result: {}, error: null, timings: timings(), exit_code: null, evidence: { kind: "none", data: null }, origin: "runner" }), s.next("step.finished", { run_id: "run-1", step: 1, status: "completed", reason: "completed" }));

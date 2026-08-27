@@ -18,7 +18,7 @@ Replaying a history starts from empty state and applies its recorded events in o
 
 `initialState(sessionId?)` creates empty execution state, optionally bound to an expected session identity. `applyEvent(state, event)` validates one event and returns the next state; `replay(events, sessionId?)` applies a complete ordered history from empty state. Invalid event shapes fail schema parsing, while invalid histories raise `EventReducerError` with a diagnostic `code`.
 
-State keeps runs and their steps, requests, tools, and approvals in maps keyed by identity. It is an in-memory domain projection, not a JSON wire format or a replacement for canonical events. Callers must treat returned state as read-only and retain the events separately when they need the full evidence record.
+State keeps runs and their steps, requests, tools, and approvals in maps keyed by identity. Tool state retains a `started` flag after settlement so an interrupted dispatched call remains distinguishable from an unstarted one. It is an in-memory domain projection, not a JSON wire format or a replacement for canonical events. Callers must treat returned state as read-only and retain the events separately when they need the full evidence record.
 
 ## Lifecycle boundary
 
@@ -44,7 +44,7 @@ Payload validation does not identify secrets, prove that a snapshot is complete,
 
 Reduction is deterministic and does not mutate its input state or dispatch a provider, tool, filesystem operation, or timer. It projects admitted facts; it cannot prove real subprocess cleanup, enforce a wall-clock approval deadline, or perform startup recovery.
 
-Persistent workspace quarantine after cleanup failure, payload retention budgets, public payload-reference formats, masking/truncation metadata, and actual secret masking remain service work. The current contracts are not evidence of an exact-request trace capture pipeline.
+The [recovery reference](recovery.md) owns pure recovery planning, model-history projection, and store admission blocking after uncertain tool outcomes or cleanup failure. Actual process cleanup, a blocker-resolution mechanism, payload retention budgets, public payload-reference formats, masking/truncation metadata, and secret masking remain service work. The current contracts are not evidence of an exact-request trace capture pipeline.
 
 The [event store](event-store.md) persists the execution vocabulary, validates transitions inside a transaction, and accepts idempotent commands. Its private payload references hydrate back into the shared event contract. The browser probe consumes the shared event union without importing core or server; it is not a Chat or Trace interface.
 

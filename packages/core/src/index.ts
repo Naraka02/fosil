@@ -42,6 +42,7 @@ export interface ToolState {
   readonly requiresApproval: boolean;
   readonly approvalId: string | null;
   readonly status: ToolStatus;
+  readonly started: boolean;
   readonly reason: EventReason | null;
   readonly result: JsonValue | null;
   readonly error: ExecutionError | null;
@@ -321,7 +322,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         callId: event.data.call_id, requestId: request.requestId, step: step.step, attempt: request.attempt,
         toolName: event.data.tool_name, arguments: event.data.arguments, cwd: event.data.cwd,
         providerCallId: expected.provider_call_id, requiresApproval: event.data.requires_approval,
-        approvalId: event.data.approval_id, status: "created", reason: null,
+        approvalId: event.data.approval_id, status: "created", started: false, reason: null,
         result: null, error: null, timings: null, exitCode: null, evidence: null
       };
       return replaceRun(previous, {
@@ -380,7 +381,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         "busy-tool", "tools execute once and sequentially");
       requireFact(!call.requiresApproval || (call.approvalId !== null && run.approvals.get(call.approvalId)?.status === "allowed"),
         "approval-required", "tool requires its own allow-once decision");
-      return replaceRun(previous, { ...run, activeToolId: call.callId, tools: put(run.tools, call.callId, { ...call, status: "running" }) });
+      return replaceRun(previous, { ...run, activeToolId: call.callId, tools: put(run.tools, call.callId, { ...call, status: "running", started: true }) });
     }
     case "tool.finished": {
       const call = callFor(run, event.data);
@@ -455,3 +456,8 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
 export function replay(events: readonly unknown[], sessionId: string | null = null): ExecutionState {
   return events.reduce<ExecutionState>((state, event) => applyEvent(state, event), initialState(sessionId));
 }
+
+export { planRecovery, workspaceBlockers } from "./recovery.js";
+export type { WorkspaceBlocker } from "./recovery.js";
+export { buildModelHistory } from "./history.js";
+export type { ModelHistoryMessage } from "./history.js";

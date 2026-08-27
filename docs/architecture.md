@@ -9,8 +9,8 @@ This reference owns the implemented system composition and dependency boundaries
 | Package | Responsibility | Boundary |
 | --- | --- | --- |
 | [contracts](../packages/contracts/src/index.ts) | Shared runtime event/command schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
-| [core](../packages/core/src/index.ts) | Framework-independent event validation and pure execution-state reduction | Depends on contracts; no agent loop, provider, or tool execution yet |
-| [server](../packages/server/src/index.ts) | Worker-owned SQLite event storage and command acceptance | Native database access stays in a Node worker; no execution runner, startup recovery, or HTTP routes yet |
+| [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, and provider-neutral history projection | Depends on contracts; no agent loop, provider, or tool execution yet |
+| [server](../packages/server/src/index.ts) | Worker-owned storage, command acceptance, startup recovery, and paged history | Native database access stays in a Node worker; no execution runner or HTTP routes yet |
 | [web](../packages/web/src/App.tsx) | Browser probe of the shared event schema | Depends on contracts, not core or server; no Chat or Trace interface yet |
 
 The shared schemas are the source of truth for event shapes; the [execution-event reference](execution-events.md) owns ordering, lifecycle, and reduction semantics. Runtime parsing rejects invalid values; TypeScript types alone are not a validation boundary. The browser uses fixed examples to demonstrate event-union consumption and does not create a session.
@@ -19,7 +19,7 @@ Shared workspace schema validation checks an absolute Linux path prefix only. Th
 
 ## Storage boundary
 
-The [event-store reference](event-store.md) owns the asynchronous worker interface, transactions, payload storage, receipts, request limits, and exclusive ownership. The worker uses the shared event schemas and core reducer inside its persistence boundary. Its command handler accepts user intent but does not drive effects. Successful acceptance and readback do not establish safe restart of interrupted work or exactly-once external effects.
+The [event-store reference](event-store.md) owns the asynchronous worker interface, transactions, payload storage, receipts, paging, request limits, and exclusive ownership. The [recovery reference](recovery.md) owns startup admission and uncertainty handling. The worker uses shared schemas and the core reducer inside its persistence boundary. Its command handler accepts user intent but does not drive effects. Recovery never automatically resumes interrupted work or establishes exactly-once external effects.
 
 ## Verification boundary
 

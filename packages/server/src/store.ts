@@ -1,10 +1,10 @@
 import { Worker } from "node:worker_threads";
-import { commandAckSchema, parseEvent, type Command, type CommandAck, type Event, type EventInput } from "@fosil/contracts";
-import { isWorkerResponse, StoreError, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
+import { commandAckSchema, historyPageSchema, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest } from "@fosil/contracts";
+import { isWorkerResponse, StoreError, type RecoveryReport, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
 
 export type StoreEvent = Event;
 export { StoreError } from "./storage-protocol.js";
-export type { SessionSummary } from "./storage-protocol.js";
+export type { SessionSummary, RecoveryReport } from "./storage-protocol.js";
 
 export interface StoreOptions {
   maxPending?: number;
@@ -50,7 +50,7 @@ export class SqliteWorkerStore {
     this.worker.on("exit", (code) => this.fail(new StoreError("worker_exit", `SQLite worker exited with code ${code}`)));
   }
 
-  async open(path: string): Promise<void> { await this.call({ type: "open", path }); }
+  async open(path: string): Promise<RecoveryReport> { return await this.call({ type: "open", path }) as RecoveryReport; }
 
   async append(event: EventInput): Promise<Event> { return (await this.appendBatch([event]))[0]!; }
 
@@ -66,6 +66,10 @@ export class SqliteWorkerStore {
   async read(sessionId: string): Promise<Event[]> {
     const result = await this.call({ type: "read", sessionId });
     return (result as unknown[]).map(parseEvent);
+  }
+
+  async readPage(request: HistoryPageRequest): Promise<HistoryPage> {
+    return historyPageSchema.parse(await this.call({ type: "history_page", request }));
   }
 
   async getSession(sessionId: string): Promise<SessionSummary | null> {

@@ -2,9 +2,9 @@ import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { commandAckSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type Event, type EventInput } from "@fosil/contracts";
-import { applyEvent, replay, type ExecutionState } from "@fosil/core";
-import { StoreError, type SessionSummary } from "./storage-protocol.js";
+import { commandAckSchema, historyPageRequestSchema, historyPageSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type Event, type EventInput, type HistoryPage } from "@fosil/contracts";
+import { applyEvent, planRecovery, replay, workspaceBlockers, type ExecutionState } from "@fosil/core";
+import { StoreError, type RecoveryReport, type SessionSummary } from "./storage-protocol.js";
 
 const schema = `
   CREATE TABLE sessions (
@@ -43,9 +43,24 @@ function summary(state: ExecutionState): SessionSummary | null {
   return { session_id: state.sessionId, workspace_root: state.workspaceRoot, last_seq: state.lastSeq, active_run_id: state.activeRunId, activity: state.activity };
 }
 
+type EventRow = { session_id: string; seq: number; schema_version: number; type: string; recorded_at: string; data_json: string | null };
+const eventColumns = "SELECT e.session_id, e.seq, e.schema_version, e.type, e.recorded_at, p.data_json FROM events e LEFT JOIN payloads p USING(payload_id)";
+function hydrate(rows: EventRow[]): Event[] {
+  return rows.map(({ data_json, ...envelope }) => {
+    if (data_json === null) throw new Error("Missing event payload");
+    return parseEvent({ ...envelope, data: JSON.parse(data_json) });
+  });
+}
+function overlaps(a: string, b: string): boolean {
+  return a === b || a.startsWith(b.endsWith("/") ? b : `${b}/`) || b.startsWith(a.endsWith("/") ? a : `${a}/`);
+}
+
 /** This class is instantiated only inside the storage worker. */
 export class StorageDatabase {
+  private recoveryReport: RecoveryReport = { recovered_sessions: [], blocked_workspaces: [] };
   private constructor(private readonly db: Database.Database) {}
+
+  get recovery(): RecoveryReport { return this.recoveryReport; }
 
   static open(path: string): StorageDatabase {
     const db = new Database(canonicalDatabasePath(path), { timeout: 0 });
@@ -65,7 +80,9 @@ export class StorageDatabase {
       db.prepare("SELECT session_id, workspace_root, last_seq, active_run_id, activity FROM sessions LIMIT 0").all();
       db.prepare("SELECT e.schema_version, e.type, e.recorded_at, e.seq, e.session_id, p.data_json FROM events e LEFT JOIN payloads p USING(payload_id) LIMIT 0").all();
       db.prepare("SELECT scope_kind, scope_id, command_id, fingerprint, ack_json FROM command_receipts LIMIT 0").all();
-      return new StorageDatabase(db);
+      const store = new StorageDatabase(db);
+      store.recoveryReport = store.recoverOnOpen();
+      return store;
     } catch (error) {
       db.close();
       if (error instanceof Error && "code" in error && error.code === "SQLITE_BUSY") {
@@ -81,6 +98,27 @@ export class StorageDatabase {
 
   getSession(sessionId: string): SessionSummary | null {
     return this.db.transaction(() => summary(this.load(sessionId).state))();
+  }
+
+  readPage(raw: unknown): HistoryPage {
+    const request = historyPageRequestSchema.parse(raw);
+    return this.db.transaction(() => {
+      const index = this.db.prepare("SELECT last_seq FROM sessions WHERE session_id = ?").get(request.session_id) as { last_seq: number } | undefined;
+      if (!index) throw new StoreError("session_not_found", "Session does not exist");
+      const cursor = request.cursor ?? { session_id: request.session_id, after: 0, through: index.last_seq };
+      if (cursor.through > index.last_seq) throw new StoreError("invalid_cursor", "History cursor is beyond committed history");
+      const rows = this.db.prepare(`${eventColumns} WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`)
+        .all(request.session_id, cursor.after, cursor.through, request.limit) as EventRow[];
+      try {
+        const events = hydrate(rows);
+        if (events.length !== Math.min(request.limit, cursor.through - cursor.after)
+          || events.some((event, i) => event.seq !== cursor.after + i + 1)) throw new Error("History page contains a sequence gap");
+        const after = events.at(-1)?.seq ?? cursor.after;
+        return historyPageSchema.parse({ session_id: request.session_id, events, cursor: { ...cursor, after }, done: after === cursor.through });
+      } catch (error) {
+        throw new StoreError("corrupt_history", error instanceof Error ? error.message : "Invalid history page");
+      }
+    })();
   }
 
   appendBatch(inputs: readonly EventInput[]): Event[] {
@@ -160,17 +198,45 @@ export class StorageDatabase {
     }).immediate();
   }
 
+  private sessionIds(): string[] {
+    // Include orphaned event sessions so a damaged index cannot hide an unfinished run.
+    return (this.db.prepare("SELECT session_id FROM sessions UNION SELECT session_id FROM events ORDER BY session_id").all() as Array<{ session_id: string }>).map((row) => row.session_id);
+  }
+
+  private recoverOnOpen(): RecoveryReport {
+    return this.db.transaction(() => {
+      const report: RecoveryReport = { recovered_sessions: [], blocked_workspaces: [] };
+      const recordedAt = new Date().toISOString();
+      for (const sessionId of this.sessionIds()) {
+        const before = this.load(sessionId).state;
+        const inputs = planRecovery(before, recordedAt);
+        if (inputs.length > 0) {
+          const appended = this.appendWithinTransaction(inputs);
+          report.recovered_sessions.push({ session_id: sessionId, run_id: before.activeRunId!, first_seq: appended[0]!.seq, last_seq: appended.at(-1)!.seq });
+        }
+        const after = inputs.length > 0 ? this.load(sessionId).state : before;
+        for (const blocker of workspaceBlockers(after)) {
+          report.blocked_workspaces.push({ ...blocker, session_id: sessionId, workspace_root: after.workspaceRoot! });
+        }
+      }
+      return report;
+    }).immediate();
+  }
+
+  private requireSafeWorkspace(root: string): void {
+    for (const sessionId of this.sessionIds()) {
+      const state = this.load(sessionId).state;
+      if (state.workspaceRoot && overlaps(root, state.workspaceRoot) && workspaceBlockers(state).length > 0) {
+        throw new StoreError("workspace_blocked", "Workspace has an unknown tool outcome or cleanup failure; verified resolution is required");
+      }
+    }
+  }
+
   private load(sessionId: string): { events: Event[]; state: ExecutionState } {
     if (typeof sessionId !== "string" || sessionId.length === 0) throw new StoreError("invalid_session", "Session identity is required");
-    const rows = this.db.prepare(`SELECT e.session_id, e.seq, e.schema_version, e.type, e.recorded_at, p.data_json
-      FROM events e LEFT JOIN payloads p USING(payload_id) WHERE session_id = ? ORDER BY seq`).all(sessionId) as Array<{
-        session_id: string; seq: number; schema_version: number; type: string; recorded_at: string; data_json: string | null;
-      }>;
+    const rows = this.db.prepare(`${eventColumns} WHERE session_id = ? ORDER BY seq`).all(sessionId) as EventRow[];
     try {
-      const events = rows.map(({ data_json, ...envelope }) => {
-        if (data_json === null) throw new Error("Missing event payload");
-        return parseEvent({ ...envelope, data: JSON.parse(data_json) });
-      });
+      const events = hydrate(rows);
       const state = replay(events, sessionId);
       const index = this.db.prepare("SELECT session_id, workspace_root, last_seq, active_run_id, activity FROM sessions WHERE session_id = ?").get(sessionId) as SessionSummary | undefined;
       if (JSON.stringify(index ?? null) !== JSON.stringify(summary(state))) throw new Error("Session index disagrees with event history");
@@ -186,6 +252,9 @@ export class StorageDatabase {
     for (const raw of inputs) {
       const input = parseEventInput(raw);
       const previous = states.get(input.session_id) ?? this.load(input.session_id).state;
+      if (previous.workspaceRoot !== null && ["run.started", "step.started", "model.request.started", "tool.call.created", "approval.requested", "tool.started"].includes(input.type)) {
+        this.requireSafeWorkspace(previous.workspaceRoot);
+      }
       const event = parseEvent({ ...input, seq: previous.lastSeq + 1 });
       const state = applyEvent(previous, event);
       const row = summary(state)!;

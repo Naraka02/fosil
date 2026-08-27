@@ -1,11 +1,12 @@
-import { mkdtemp, rm, symlink, link, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, link, writeFile, readFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseEventInput, type Command, type EventInput } from "@fosil/contracts";
+import { parseEventInput, type Command, type EventInput, type HistoryCursor } from "@fosil/contracts";
+import { buildModelHistory, replay } from "@fosil/core";
 import { SqliteWorkerStore, type StoreOptions } from "./store.js";
 
 const stores: SqliteWorkerStore[] = [];
@@ -107,6 +108,198 @@ async function childResult(source: string): Promise<{ child: ChildProcess; resul
 }
 
 describe("SQLite worker store", () => {
+  it("pages a fixed prefix while new events and recovery facts are appended", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    const session = await createSession(store, path);
+    await store.execute({ type: "run.submit", session_id: session.session_id, command_id: "submit", content: "Fix" });
+    const first = await store.readPage({ session_id: session.session_id, limit: 1 });
+    expect(first.cursor).toEqual({ session_id: session.session_id, after: 1, through: 3 });
+    const before = await store.read(session.session_id);
+    const runId = (await store.getSession(session.session_id))!.active_run_id!;
+    await store.execute({ type: "run.cancel", session_id: session.session_id, run_id: runId, command_id: "cancel" });
+    await store.close();
+    const reader = createStore();
+    const report = await reader.open(path);
+    expect(report.recovered_sessions).toHaveLength(1);
+    const second = await reader.readPage({ session_id: session.session_id, cursor: first.cursor, limit: 2 });
+    expect(second.done).toBe(true);
+    expect([...first.events, ...second.events]).toEqual(before);
+    expect((await reader.readPage({ session_id: session.session_id, cursor: first.cursor, limit: 2 }))).toEqual(second);
+    expect((await reader.readPage({ session_id: session.session_id, cursor: second.cursor })).events).toEqual([]);
+    const fresh = await reader.readPage({ session_id: session.session_id });
+    expect(fresh.cursor.through).toBe(5);
+    expect(fresh.events.at(-1)).toMatchObject({ type: "run.finished", data: { status: "interrupted" } });
+  });
+
+  it("rejects cross-session, future, reversed, and malformed history cursors", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    const session = await createSession(store, path);
+    for (const cursor of [
+      { session_id: "different", after: 0, through: 1 },
+      { session_id: session.session_id, after: 0, through: 2 },
+      { session_id: session.session_id, after: 2, through: 1 },
+      { session_id: session.session_id, after: -1, through: 1 },
+      { session_id: session.session_id, after: 0.5, through: 1 },
+      { session_id: session.session_id, after: "0", through: 1 }
+    ]) {
+      await expect(store.readPage({ session_id: session.session_id, cursor: cursor as HistoryCursor })).rejects.toThrow();
+    }
+    for (const limit of [0, 201, 1.5]) await expect(store.readPage({ session_id: session.session_id, limit })).rejects.toThrow();
+    await expect(store.readPage({ session_id: "unknown" })).rejects.toMatchObject({ code: "session_not_found" });
+    expect((await store.readPage({ session_id: session.session_id })).events).toHaveLength(1);
+  });
+
+  it("cancels stale approvals before admitting queued commands and recovers only once", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    const run = await gatedRun(store, path);
+    const before = await store.read(run.sessionId);
+    await store.close();
+    const reader = createStore();
+    const opened = reader.open(path);
+    const late = reader.execute({ type: "approval.resolve", session_id: run.sessionId, run_id: run.runId, approval_id: "approval-1", command_id: "late", decision: "allow" });
+    await expect(late).rejects.toMatchObject({ code: "run_not_active" });
+    const report = await opened;
+    expect(report.recovered_sessions).toHaveLength(1);
+    expect(report.blocked_workspaces).toEqual([]);
+    const recovered = await reader.read(run.sessionId);
+    expect(recovered.slice(0, before.length)).toEqual(before);
+    expect(recovered.slice(before.length).map((event) => event.type)).toEqual(["approval.resolved", "tool.finished", "step.finished", "run.finished"]);
+    expect(recovered[before.length]).toMatchObject({ data: { status: "cancelled", origin: "recovery" } });
+    await reader.close();
+    const reopened = createStore();
+    expect(await reopened.open(path)).toEqual({ recovered_sessions: [], blocked_workspaces: [] });
+    expect(await reopened.read(run.sessionId)).toEqual(recovered);
+    const next = await reopened.execute({ type: "run.submit", session_id: run.sessionId, command_id: "next", content: "Continue" });
+    expect(next.first_seq).toBe(recovered.length + 1);
+  });
+
+  it("rolls back recovery across sessions and keeps admission closed if a later closure fails", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    for (const sessionId of ["a", "z"]) {
+      await store.appendBatch([
+        { ...validInput, session_id: sessionId, data: { ...validInput.data, workspace_root: dirname(path) } },
+        input("run.started", { run_id: `run-${sessionId}`, command_id: "submit", origin: "user" }, sessionId),
+        input("user.message", { run_id: `run-${sessionId}`, command_id: "submit", content: "Fix", origin: "user" }, sessionId)
+      ]);
+    }
+    await store.close();
+    const db = new Database(path);
+    db.exec("CREATE TRIGGER fail_recovery BEFORE INSERT ON events WHEN NEW.session_id = 'z' AND NEW.type = 'run.finished' BEGIN SELECT RAISE(ABORT, 'injected recovery failure'); END");
+    db.close();
+    const failed = createStore();
+    await expect(failed.open(path)).rejects.toThrow("injected recovery failure");
+    await expect(failed.execute({ type: "run.submit", session_id: "a", command_id: "next", content: "Continue" })).rejects.toMatchObject({ code: "not_open" });
+    await failed.close();
+    expect(counts(path)).toEqual({ sessions: 2, events: 6, payloads: 6, command_receipts: 0 });
+    const repair = new Database(path);
+    repair.exec("DROP TRIGGER fail_recovery");
+    repair.close();
+    const reader = createStore();
+    expect((await reader.open(path)).recovered_sessions).toHaveLength(2);
+    expect(await reader.getSession("a")).toMatchObject({ last_seq: 4, activity: "idle" });
+    expect(await reader.getSession("z")).toMatchObject({ last_seq: 4, activity: "idle" });
+  });
+
+  it("keeps cleanup failures blocked across sessions, overlapping roots, and reopen", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    const run = await gatedRun(store, path);
+    await store.execute({ type: "approval.resolve", session_id: run.sessionId, run_id: run.runId, command_id: "allow", approval_id: "approval-1", decision: "allow" });
+    const { arguments: _args, ...finished } = run.call;
+    await store.appendBatch([
+      input("tool.started", { ...run.call, origin: "runner" }, run.sessionId),
+      input("tool.finished", { ...finished, origin: "runner", status: "failed", reason: "cleanup_failed", result: null,
+        error: { code: "cleanup_failed", message: "Fixture cleanup is uncertain", details: null }, exit_code: null,
+        timings: { first_content_ms: null, duration_ms: null }, evidence: { kind: "unknown", data: null }
+      }, run.sessionId)
+    ]);
+    await store.close();
+    const reader = createStore();
+    expect((await reader.open(path)).blocked_workspaces).toEqual([expect.objectContaining({ workspace_root: dirname(path), reason: "cleanup_failed" })]);
+    const childRoot = join(dirname(path), "child-workspace");
+    await mkdir(childRoot);
+    const alias = join(dirname(path), "alias-workspace");
+    await symlink(dirname(path), alias);
+    for (const [index, workspace] of [dirname(path), childRoot, alias, dirname(dirname(path))].entries()) {
+      const session = await reader.execute({ type: "session.create", command_id: `blocked-create-${index}`, workspace_root: workspace });
+      await expect(reader.execute({ type: "run.submit", session_id: session.session_id, command_id: "new", content: "Fix" })).rejects.toMatchObject({ code: "workspace_blocked" });
+      await expect(reader.append(input("run.started", { run_id: "bypass", command_id: "raw", origin: "runner" }, session.session_id))).rejects.toMatchObject({ code: "workspace_blocked" });
+    }
+    const unrelated = await createSession(reader, await databasePath(), "unrelated");
+    await reader.execute({ type: "run.submit", session_id: unrelated.session_id, command_id: "new", content: "Safe fixture" });
+    const prefix = await reader.read(run.sessionId);
+    await reader.close();
+    const again = createStore();
+    expect((await again.open(path)).blocked_workspaces).toEqual([expect.objectContaining({ reason: "cleanup_failed" })]);
+    expect(await again.read(run.sessionId)).toEqual(prefix);
+  });
+
+  it.each(["before_dispatch", "after_dispatch", "after_result"] as const)("recovers a killed fixture at %s without repeating its side effect", async (boundary) => {
+    const path = await databasePath();
+    const effectPath = join(dirname(path), "effect.txt");
+    const { child, result } = await childResult(`
+      import { SqliteWorkerStore } from ${JSON.stringify(storeModule)};
+      import { appendFile } from "node:fs/promises";
+      const store = new SqliteWorkerStore();
+      await store.open(${JSON.stringify(path)});
+      const created = await store.execute({type:"session.create",command_id:"create",workspace_root:${JSON.stringify(dirname(path))}});
+      const accepted = await store.execute({type:"run.submit",session_id:created.session_id,command_id:"submit",content:"Fixture"});
+      const base = {schema_version:1,session_id:created.session_id,recorded_at:"2026-08-27T00:00:00.000Z"};
+      const c = {run_id:accepted.run_id,step:1,request_id:"request",attempt:1};
+      const call = {...c,call_id:"call",approval_id:null,tool_name:"fixture_effect",arguments:{},cwd:${JSON.stringify(dirname(path))}};
+      const e = (type,data) => ({...base,type,data});
+      await store.appendBatch([
+        e("step.started",{run_id:c.run_id,step:1}),
+        e("model.request.started",{...c,origin:"runner",request:{provider:"fixture",model:"fixture",system_instructions:[],messages:[],tools:[],settings:{temperature:null,top_p:null,max_output_tokens:null}}}),
+        e("model.request.finished",{...c,status:"succeeded",reason:"completed",origin:"provider",stop_reason:"tool_calls",output:{text:"",reasoning:null,tool_calls:[{provider_call_id:"provider-call",name:"fixture_effect",arguments:{}}]},error:null,usage:{input_tokens:null,output_tokens:null,total_tokens:null,cache_read_tokens:null,cache_write_tokens:null},timings:{first_content_ms:null,duration_ms:null}}),
+        e("tool.call.created",{...call,provider_call_id:"provider-call",requires_approval:false,origin:"provider"})
+      ]);
+      if (${JSON.stringify(boundary)} !== "before_dispatch") {
+        await store.append(e("tool.started",{...call,origin:"runner"}));
+        await appendFile(${JSON.stringify(effectPath)},"effect\\n");
+      }
+      if (${JSON.stringify(boundary)} === "after_result") {
+        const {arguments:args,...finished} = call;
+        await store.append(e("tool.finished",{...finished,status:"succeeded",reason:"completed",origin:"runner",result:{wrote:true},error:null,exit_code:0,timings:{first_content_ms:null,duration_ms:null},evidence:{kind:"file_change",data:{fixture:true}}}));
+      }
+      console.log(JSON.stringify({session_id:created.session_id,run_id:accepted.run_id}));
+    `);
+    const exited = once(child, "exit");
+    child.kill("SIGKILL");
+    await exited;
+    const before = await readFile(effectPath, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+    expect(before).toBe(boundary === "before_dispatch" ? "" : "effect\n");
+    const reader = createStore();
+    const report = await reader.open(path);
+    expect(report.recovered_sessions).toHaveLength(1);
+    expect(report.blocked_workspaces).toHaveLength(boundary === "after_dispatch" ? 1 : 0);
+    const sessionId = result.session_id as string;
+    const history = await reader.read(sessionId);
+    const tool = buildModelHistory(replay(history)).at(-1);
+    expect(tool).toMatchObject({ role: "tool", content: { execution: boundary === "before_dispatch" ? "not_started" : boundary === "after_dispatch" ? "unknown" : "settled" } });
+    expect((await reader.execute({ type: "run.submit", session_id: sessionId, command_id: "submit", content: "Fixture" })).run_id).toBe(result.run_id);
+    await reader.close();
+    const reopened = createStore();
+    expect((await reopened.open(path)).recovered_sessions).toEqual([]);
+    expect(await reopened.read(sessionId)).toEqual(history);
+    if (boundary === "after_dispatch") {
+      await expect(reopened.execute({ type: "run.submit", session_id: sessionId, command_id: "next", content: "Continue" })).rejects.toMatchObject({ code: "workspace_blocked" });
+    } else {
+      await reopened.execute({ type: "run.submit", session_id: sessionId, command_id: "next", content: "Continue" });
+    }
+    const after = await readFile(effectPath, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return ""; throw error; });
+    expect(after).toBe(before);
+  });
+
   it("rolls back events, payloads, and indexes without consuming sequence numbers", async () => {
     const path = await databasePath();
     const store = createStore();
@@ -155,7 +348,8 @@ describe("SQLite worker store", () => {
     await reopened.open(path);
     expect(await reopened.execute(command)).toEqual(first);
     expect(await createSession(reopened, path)).toEqual(session);
-    expect(await reopened.getSession(session.session_id)).toMatchObject({ last_seq: 3, active_run_id: first.run_id, activity: "running" });
+    expect(await reopened.getSession(session.session_id)).toMatchObject({ last_seq: 4, active_run_id: null, activity: "idle" });
+    expect((await reopened.read(session.session_id)).at(-1)).toMatchObject({ type: "run.finished", data: { run_id: first.run_id, status: "interrupted", origin: "recovery" } });
   });
 
   it("serializes different new submission keys and scopes receipts to each session", async () => {
@@ -359,9 +553,8 @@ describe("SQLite worker store", () => {
     db.exec("UPDATE payloads SET data_json = '{}'");
     db.close();
     const reader = createStore();
-    await reader.open(path);
-    await expect(reader.read(validInput.session_id)).rejects.toMatchObject({ code: "corrupt_history" });
-    await expect(reader.append(validInput)).rejects.toThrow("closed");
+    await expect(reader.open(path)).rejects.toMatchObject({ code: "corrupt_history" });
+    await expect(reader.append(validInput)).rejects.toMatchObject({ code: "not_open" });
   });
 
   it("bounds pending requests and bytes while allowing close to drain accepted work", async () => {

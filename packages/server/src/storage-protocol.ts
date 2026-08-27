@@ -1,10 +1,12 @@
-import type { Command, EventInput } from "@fosil/contracts";
+import type { Command, EventInput, HistoryPageRequest } from "@fosil/contracts";
+import type { WorkspaceBlocker } from "@fosil/core";
 
 export type WorkerCommand =
   | { type: "open"; path: string }
   | { type: "append_batch"; events: readonly EventInput[] }
   | { type: "command"; command: Command }
   | { type: "read"; sessionId: string }
+  | { type: "history_page"; request: HistoryPageRequest }
   | { type: "session"; sessionId: string }
   | { type: "close" };
 
@@ -19,6 +21,11 @@ export interface SessionSummary {
   last_seq: number;
   active_run_id: string | null;
   activity: "idle" | "running" | "waiting_for_approval" | "cancelling";
+}
+
+export interface RecoveryReport {
+  recovered_sessions: Array<{ session_id: string; run_id: string; first_seq: number; last_seq: number }>;
+  blocked_workspaces: Array<WorkspaceBlocker & { session_id: string; workspace_root: string }>;
 }
 
 export class StoreError extends Error {
