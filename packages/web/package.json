@@ -1,0 +1,15 @@
+{
+  "name": "@fosil/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "@fosil/contracts": "0.1.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  }
+}

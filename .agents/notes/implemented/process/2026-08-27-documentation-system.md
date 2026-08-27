@@ -46,4 +46,4 @@ The baseline's verification covers the presence and ownership of its documents, 
 
 The first note records an effective documentation and process decision, not an approval for unfinished product work. Subsequent edits use the same [documentation review procedure](../../../../docs/development.md#documentation-checks).
 
-There is no committed validation script, automated documentation gate, or runtime test suite. Link and format checks do not prove that every future edit will preserve semantic ownership; that remains a review responsibility.
+This documentation decision adds no committed documentation validation script or automated documentation gate. Runtime tooling is documented in the [development guide](../../../../docs/development.md#available-tooling). Link and format checks do not prove that every future edit will preserve semantic ownership; that remains a review responsibility.

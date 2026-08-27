@@ -9,6 +9,8 @@ This page routes readers to the owner of a topic. It is not a progress tracker o
 | Need | Read |
 | --- | --- |
 | Understand the project at a glance | [Project README](../README.md) |
+| Understand the approved first release | [Product scope and acceptance conditions](product-scope.md) |
+| Understand the current implementation | [Architecture and package boundaries](architecture.md) |
 | Begin an agent-assisted task | [Repository instructions](../AGENTS.md), then instructions in the affected subtree |
 | Make and verify a change | [Development guide](development.md) |
 | Place or edit documentation | [Documentation standard](AGENTS.md) |

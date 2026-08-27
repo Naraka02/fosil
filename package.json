@@ -1,0 +1,33 @@
+{
+  "name": "fosil",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "workspaces": [
+    "packages/contracts",
+    "packages/core",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "build": "tsc -b && vite build --config packages/web/vite.config.ts",
+    "typecheck": "tsc -b --pretty false",
+    "pretest": "tsc -b --pretty false",
+    "test": "vitest run",
+    "pretest:watch": "tsc -b --pretty false",
+    "test:watch": "vitest",
+    "sqlite:probe": "node packages/server/dist/sqlite-probe.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.3",
+    "vitest": "^3.2.4"
+  }
+}

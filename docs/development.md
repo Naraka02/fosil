@@ -6,7 +6,25 @@ This guide owns the single-maintainer working process, change boundaries, verifi
 
 ## Available tooling
 
-The repository has no selected runtime, dependency manager, build command, test suite, or CI workflow. Do not infer any of these from the upstream project used as a documentation reference. Add setup and command instructions when the corresponding project tooling exists.
+The workspace uses Node.js 24, npm, and strict TypeScript with ESM. The runtime selector is [`.nvmrc`](../.nvmrc); the [root manifest](../package.json) owns workspace membership and supported scripts. Use the supported runtime before installing dependencies because the SQLite driver includes a native addon. Linux is the initial execution target, including Linux inside WSL2; native Windows and macOS are not verified.
+
+### Setup and verification procedure
+
+With Node.js 24 and npm on `PATH`, run these commands from the repository root:
+
+```sh
+npm ci
+npm run typecheck
+npm run build
+npm test
+npm run sqlite:probe
+```
+
+`npm ci` installs the repository lockfile without resolving a new dependency set. Installation may need network access and, when no compatible SQLite addon binary is available, native build tools. Type checking uses TypeScript project references and emits intermediate build artifacts; it is not a no-output lint command. The build also bundles the browser probe. Tests compile their prerequisites before running Vitest. Run the build before the standalone SQLite probe, which creates and removes a temporary database.
+
+The [architecture reference](architecture.md) defines what these bootstrap probes implement and what they do not. No provider credentials are needed for these checks. There is no CI workflow, browser automation suite, or complete coding-agent application yet.
+
+On WSL, ensure `TMPDIR` names an existing, writable Linux directory. If the shell inherits an unavailable Windows temporary path, run the test and probe commands with `TMPDIR=/tmp`; no change to the system default Node installation is required.
 
 ## Working sequence
 
