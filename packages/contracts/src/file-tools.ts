@@ -23,7 +23,7 @@ export type FileToolInvocation = z.infer<typeof fileToolInvocationSchema>;
 export function parseFileToolInvocation(value: unknown): FileToolInvocation { return fileToolInvocationSchema.parse(value); }
 export function fileToolRequiresApproval(name: string): boolean { return name === "edit_file"; }
 
-/** Fresh JSON schemas for future context assembly; the runtime parser also enforces refinements. */
+/** Fresh JSON schemas for context assembly; the runtime parser also enforces refinements. */
 export function fileToolDefinitions() {
   return [
     { name: "read_file", description: "Read one bounded UTF-8 file and its SHA-256 digest.", parameters: z.toJSONSchema(readArguments) },

@@ -10,7 +10,7 @@ The [shared tool service](tool-execution.md) owns normalization, approval progre
 
 ## Tools and retained results
 
-`fileToolDefinitions()` returns fresh JSON Schema definitions derived from the shared argument schemas for future context assembly. The exported schemas do not encode every runtime refinement, including the relative-path and single-line-query checks. `parseFileToolInvocation` remains authoritative; provider schema acceptance alone does not validate or authorize a call.
+`fileToolDefinitions()` returns fresh JSON Schema definitions derived from the shared argument schemas for [context assembly](agent-loop.md#request-assembly-and-provider-boundary). The exported schemas do not encode every runtime refinement, including the relative-path and single-line-query checks. `parseFileToolInvocation` remains authoritative; provider schema acceptance alone does not validate or authorize a call.
 
 | Tool | Behavior | Permission |
 | --- | --- | --- |

@@ -1,14 +1,13 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFoundationAcceptance } from "./foundation-acceptance.js";
 import { renderFoundationReport } from "./foundation-report.js";
+import { runAcceptanceGit } from "./acceptance-git.js";
 
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const git = async (...args: string[]) => (await promisify(execFile)("git", args, { cwd: root, maxBuffer: 16 * 1024 * 1024 })).stdout;
+const git = (...args: string[]) => runAcceptanceGit(root, ...args);
 const paths = (await git("ls-files", "--cached", "--others", "--exclude-standard", "-z")).split("\0").filter(Boolean).sort();
 const manifest = await Promise.all([...new Set(paths)].map(async (path) => {
   try { return { path, sha256: createHash("sha256").update(await readFile(join(root, path))).digest("hex") }; }

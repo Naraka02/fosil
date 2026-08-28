@@ -10,18 +10,20 @@ type FinishedData = Finished["data"];
 export type ToolAdvance = { status: "finished"; event: Finished }
   | { status: "waiting_for_approval"; approvalId: string; expiresAt: string }
   | { status: "in_progress"; callId: string };
-export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number }
+export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number; signal?: AbortSignal }
 const unsettled = (tool: ToolState) => ["created", "waiting_for_approval", "running"].includes(tool.status);
 
 /** Trusted local service; callers cannot supply operation arguments, policy, or cwd. */
 export class ToolService {
   private readonly now: () => Date;
   private readonly ttl: number;
+  private readonly signal: AbortSignal | undefined;
   private readonly operations = new Map<string, Promise<unknown>>();
 
   constructor(private readonly store: SqliteWorkerStore, options: ToolServiceOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.ttl = options.approvalTtlMs ?? 300_000;
+    this.signal = options.signal;
     if (!Number.isSafeInteger(this.ttl) || this.ttl < 1 || this.ttl > 86_400_000) throw new Error("Approval lifetime must be between 1 ms and 24 hours");
   }
 
@@ -49,12 +51,14 @@ export class ToolService {
     });
   }
 
-  advance(sessionId: string, runId: string, callId: string): Promise<ToolAdvance> {
-    return this.coalesce(JSON.stringify(["advance", sessionId, runId, callId]), () => this.advanceOnce(sessionId, runId, callId));
+  advance(sessionId: string, runId: string, callId: string, signal?: AbortSignal): Promise<ToolAdvance> {
+    return this.coalesce(JSON.stringify(["advance", sessionId, runId, callId]), () => this.advanceOnce(sessionId, runId, callId, signal));
   }
 
-  private async advanceOnce(sessionId: string, runId: string, callId: string): Promise<ToolAdvance> {
+  private async advanceOnce(sessionId: string, runId: string, callId: string, signal?: AbortSignal): Promise<ToolAdvance> {
+    this.checkService(signal);
     const { state, run, events } = await this.load(sessionId, runId);
+    this.checkService(signal);
     const call = run.tools.get(callId);
     if (!call) throw new StoreError("missing_call", "Tool call does not exist in this run");
     if (!unsettled(call)) {
@@ -97,9 +101,23 @@ export class ToolService {
       if (this.now().getTime() < Date.parse(approval.request.expires_at)) {
         return { status: "waiting_for_approval", approvalId: approval.approvalId, expiresAt: approval.request.expires_at };
       }
-      return finish({ status: "denied", reason: "expired" }, [this.input(sessionId, "approval.resolved", {
-        ...common, status: "expired", reason: "expired", origin: "system"
-      })]);
+      try {
+        return await finish({ status: "denied", reason: "expired" }, [this.input(sessionId, "approval.resolved", {
+          ...common, status: "expired", reason: "expired", origin: "system"
+        })]);
+      } catch (error) {
+        if (!(error instanceof StoreError) || !["duplicate-terminal", "late-approval"].includes(error.code)) throw error;
+        const current = await this.load(sessionId, runId);
+        const currentCall = current.run.tools.get(callId);
+        const currentApproval = current.run.approvals.get(approval.approvalId);
+        // Only a rejected expiry settlement may be reconsidered. A recorded
+        // dispatch is never retried, and every new advance rechecks its gate.
+        if (currentCall && !currentCall.started && (current.run.cancelRequested
+          || (currentApproval && currentApproval.status !== "pending"))) {
+          return this.advanceOnce(sessionId, runId, callId, signal);
+        }
+        throw error;
+      }
     }
     const protectedFiles = this.store.protectedFiles;
     await this.store.append(this.input(sessionId, "tool.started", { ...frozen, origin: "runner" }));
@@ -107,12 +125,14 @@ export class ToolService {
     let outcome: Partial<FinishedData> & Pick<FinishedData, "status" | "reason">;
     try {
       const beforeEffect = async () => {
+        this.checkService(signal);
         // Normalize every monitor failure so it cannot become a fabricated tool result.
         let current;
         try { current = await this.load(sessionId, runId); }
         catch (error) {
           throw error instanceof StoreError ? error : new StoreError("state_unavailable", "Cannot verify durable dispatch state");
         }
+        this.checkService(signal);
         if (current.run.cancelRequested) throw new ToolCancelled();
         if (current.state.activeRunId !== runId || current.run.tools.get(callId)?.status !== "running") {
           throw new StoreError("inactive_dispatch", "Dispatch is no longer active");
@@ -142,6 +162,15 @@ export class ToolService {
 
   protected parseInvocation(value: unknown): ToolInvocation { return parseToolInvocation(value); }
   protected requiresApproval(name: string): boolean { return toolRequiresApproval(name); }
+
+  private checkService(signal?: AbortSignal): void {
+    if (this.signal?.aborted) throw new StoreError("service_stopped", "Tool service stopped; live effects must settle before teardown");
+    // User cancellation still requires authoritative persisted intent. A loop
+    // monitoring failure must instead stop an owned effect through cleanup.
+    if (signal?.aborted && signal.reason !== "cancel_requested") {
+      throw signal.reason instanceof StoreError ? signal.reason : new StoreError("state_unavailable", "Cannot verify live run state");
+    }
+  }
 
   private async finish(sessionId: string, data: FinishedData, prefix: EventInput[]): Promise<ToolAdvance> {
     const events = await this.store.appendBatch([...prefix, this.input(sessionId, "tool.finished", data)]);

@@ -4,3 +4,7 @@ export { FileToolService } from "./file-tool-service.js";
 export type { FileToolServiceOptions, ToolAdvance } from "./file-tool-service.js";
 export { ToolService } from "./tool-service.js";
 export type { ToolServiceOptions } from "./tool-service.js";
+export { AgentLoopService } from "./agent-loop.js";
+export type { AgentLoopOptions, LoopOutcome } from "./agent-loop.js";
+export { executeModelRequest, ModelProviderCleanupError } from "./model-provider.js";
+export type { ModelProvider, ModelStreamItem, ModelDelta, ModelRequestOutcome, ModelExecutionOptions } from "./model-provider.js";

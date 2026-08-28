@@ -40,7 +40,7 @@ An unstarted call does not establish an external effect, and a saved tool result
 
 No unblock command, verified post-crash process-cleanup mechanism, or uncertainty-resolution event exists yet. The [shell executor](shell-tools.md#cleanup-and-outcomes) verifies cleanup only while it owns a live invocation; that guarantee does not extend to startup replay. The store does not infer cleanup from a stale PID, kill an arbitrary process, or silently clear uncertainty on restart. A blocked workspace remains blocked until a future explicit, verified resolution mechanism is implemented. This is an admission safeguard, not an operating-system sandbox or proof that a residual process has stopped.
 
-## Future model history
+## Model history
 
 [buildModelHistory(state)](../packages/core/src/history.ts) produces detached, provider-neutral user, assistant, and tool messages in recorded order. Its exported TypeScript union owns the projection shape. It does not modify events, write synthetic records, select a model, assemble a complete request context, or implement a provider adapter.
 
@@ -48,7 +48,7 @@ Each successful complete assistant response retains its declared tool calls. The
 
 Only successful complete model responses declare tool calls in this projection. Partial tool-call deltas and failed/cancelled/interrupted requests do not become executable calls. Interrupted text remains marked as recovery content. Open requests or unresolved calls in an active run cause `history_incomplete` instead of producing a made-up tool reply. An accepted user message before its first request can be projected normally.
 
-A future adapter still needs to serialize this structure into its provider's message protocol and apply context, credential, masking, and output-budget rules. Protocol balance in this projection is not evidence of real-provider compatibility or an exact request trace pipeline.
+The [agent loop](agent-loop.md#request-assembly-and-provider-boundary) assembles and saves complete provider-neutral contexts from this projection and validates controlled-provider output. A future vendor adapter still needs provider-specific serialization, context budgeting, credentials, and masking. Protocol balance and controlled-provider request equality do not establish real-provider compatibility.
 
 ## Verification and limits
 

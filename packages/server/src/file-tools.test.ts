@@ -185,19 +185,46 @@ describe("file tool service", () => {
     expect(await readFile(join(f.root, "target.txt"), "utf8")).toBe("before\n");
   });
 
-  it("handles an expiry/allowance race through a single durable resolution", async () => {
+  it.each(["allow", "deny"] as const)("reconciles a rejected expiry when %s wins its stale snapshot", async (decision) => {
     let time = new Date();
     const f = await fixture(undefined, undefined, { now: () => time });
     await f.advance();
     time = new Date(time.getTime() + 300_001);
-    await Promise.allSettled([f.advance(), f.decide("allow")]);
+    f.store.beforeAppend = async (events) => {
+      if (events.some((event) => event.type === "approval.resolved" && event.data.status === "expired")) {
+        f.store.beforeAppend = undefined;
+        await f.decide(decision);
+      }
+    };
     const result = finished(await f.advance());
     const events = await f.store.read(f.sessionId);
     const resolutions = events.filter((event) => event.type === "approval.resolved");
     expect(resolutions).toHaveLength(1);
-    const allowed = resolutions[0]!.data.status === "allowed";
+    const allowed = decision === "allow";
+    expect(resolutions[0]!.data.status).toBe(allowed ? "allowed" : "denied");
     expect(result.data.status).toBe(allowed ? "succeeded" : "denied");
     expect(await readFile(join(f.root, "target.txt"), "utf8")).toBe(allowed ? "after\n" : "before\n");
+    expect(events.filter((event) => event.type === "tool.started")).toHaveLength(allowed ? 1 : 0);
+    expect(events.filter((event) => event.type === "tool.finished")).toHaveLength(1);
+  });
+
+  it("retains the run failure signal while reconciling an expiry lost to allowance", async () => {
+    let time = new Date();
+    const f = await fixture(undefined, undefined, { now: () => time });
+    await f.advance();
+    time = new Date(time.getTime() + 300_001);
+    const controller = new AbortController();
+    const failure = new StoreError("fixture_monitor_failure", "Cannot verify live state");
+    f.store.beforeAppend = async (events) => {
+      if (events.some((event) => event.type === "approval.resolved" && event.data.status === "expired")) {
+        f.store.beforeAppend = undefined;
+        await f.decide("allow");
+        controller.abort(failure);
+      }
+    };
+    await expect(f.service.advance(f.sessionId, f.runId, f.callId, controller.signal)).rejects.toBe(failure);
+    expect(await readFile(join(f.root, "target.txt"), "utf8")).toBe("before\n");
+    expect((await f.store.read(f.sessionId)).some((event) => event.type === "tool.started")).toBe(false);
   });
 
   it("does not dispatch twice across service instances", async () => {

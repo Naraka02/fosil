@@ -21,6 +21,8 @@
     "sqlite:probe": "node packages/server/dist/sqlite-probe.js",
     "preacceptance:foundation": "tsc -b --pretty false",
     "acceptance:foundation": "node packages/server/dist/foundation-cli.js",
+    "preacceptance:loop": "tsc -b --pretty false",
+    "acceptance:loop": "node packages/server/dist/loop-cli.js",
     "preacceptance:serve": "tsc -b --pretty false",
     "acceptance:serve": "node packages/server/dist/foundation-viewer-cli.js"
   },

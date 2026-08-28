@@ -40,7 +40,7 @@ The public reference is DeepSeek Harness at revision `b150a551b8d465e31e418e1b2e
 
 ### Decisions still required
 
-The [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md#confirmation-and-remaining-decisions) records the remaining loop, retention, reconnect, execution-service, and limit proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
+The [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md#confirmation-and-remaining-decisions) records the verified controlled-provider loop and the remaining retention, reconnect, and service integration proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
 
 ## Alternatives considered
 

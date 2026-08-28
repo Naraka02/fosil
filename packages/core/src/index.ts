@@ -461,3 +461,5 @@ export { planRecovery, workspaceBlockers } from "./recovery.js";
 export type { WorkspaceBlocker } from "./recovery.js";
 export { buildModelHistory } from "./history.js";
 export type { ModelHistoryMessage } from "./history.js";
+export { buildModelRequest } from "./model-context.js";
+export type { ModelRequestOptions } from "./model-context.js";

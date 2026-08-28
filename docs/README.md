@@ -12,9 +12,10 @@ This page routes readers to the owner of a topic. It is not a progress tracker o
 | Understand the approved first release | [Product scope and acceptance conditions](product-scope.md) |
 | Understand the current implementation | [Architecture and package boundaries](architecture.md) |
 | Reproduce and inspect the execution foundation checkpoint | [Execution Foundation acceptance](execution-foundation-acceptance.md) |
+| Understand and verify the controlled-provider loop | [Agent loop](agent-loop.md), then [Agent Loop acceptance](agent-loop-acceptance.md) |
 | Understand event validation and state transitions | [Execution events and state reduction](execution-events.md) |
 | Understand durable command acceptance and storage | [Event store and command acceptance](event-store.md) |
-| Understand restart and future model-history construction | [Startup recovery and model history](recovery.md) |
+| Understand restart and model-history construction | [Startup recovery and model history](recovery.md) |
 | Understand tool approvals and durable dispatch | [Tool execution](tool-execution.md) |
 | Understand direct file access and edit evidence | [File tools](file-tools.md) |
 | Understand shell output and live process cleanup | [Shell tools](shell-tools.md) |

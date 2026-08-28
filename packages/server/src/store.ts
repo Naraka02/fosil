@@ -69,6 +69,15 @@ export class SqliteWorkerStore {
     return (result as unknown[]).map(parseEvent);
   }
 
+  /** Preflight an append envelope, reserving the largest safe request-id width without dispatch. */
+  checkAppendSize(events: readonly EventInput[], maxBytes: number): void {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new StoreError("invalid_options", "Append byte limit must be a positive safe integer");
+    const bytes = Buffer.byteLength(JSON.stringify({ type: "append_batch", events, id: Number.MAX_SAFE_INTEGER }));
+    if (bytes > Math.min(maxBytes, this.limits.maxRequestBytes)) {
+      throw new StoreError("request_too_large", "Complete append request exceeds its byte limit");
+    }
+  }
+
   async execute(command: Command): Promise<CommandAck> {
     return commandAckSchema.parse(await this.call({ type: "command", command }));
   }

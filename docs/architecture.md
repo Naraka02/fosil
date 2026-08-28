@@ -2,15 +2,15 @@
 
 Document type: reference.
 
-This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified architectural decisions; the [execution service and Web proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md) owns the remaining integration decisions and acceptance conditions.
+This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, a controlled-provider agent loop, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the Foundation decisions; the [execution service and Web proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md) owns the loop phase and remaining integration decisions and acceptance conditions.
 
 ## Composition
 
 | Package | Responsibility | Boundary |
 | --- | --- | --- |
 | [contracts](../packages/contracts/src/index.ts) | Shared event/command/tool schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
-| [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, and provider-neutral history projection | Depends on contracts; no agent loop, provider, or tool execution yet |
-| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, and approved file/shell execution | Native database access stays in a Node worker; file/process I/O stays in the server; no agent loop or product HTTP routes yet |
+| [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, provider-neutral history projection and request assembly | Depends on contracts; no timers, storage, provider I/O, or tool execution |
+| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, approved file/shell execution, and live agent-loop ownership | Native database access stays in a Node worker; provider/file/process I/O stays in the server; no real-provider adapter or product HTTP routes yet |
 | [web](../packages/web/src/App.tsx) | Browser probe of the shared event schema | Depends on contracts, not core or server; no Chat or Trace interface yet |
 
 The shared schemas are the source of truth for event shapes; the [execution-event reference](execution-events.md) owns ordering, lifecycle, and reduction semantics. Runtime parsing rejects invalid values; TypeScript types alone are not a validation boundary. The browser probe uses fixed examples to demonstrate event-union consumption and does not create a session.
@@ -27,8 +27,14 @@ The [tool-service reference](tool-execution.md) owns shared approval, cancellati
 
 The [cross-workspace concurrency contract](tool-execution.md#cross-workspace-concurrency) defines the verified shared-service execution boundary and its failure limits. It does not require a second backend process or introduce product transport; the storage worker remains the existing thread boundary.
 
+## Agent loop boundary
+
+The [agent-loop reference](agent-loop.md) owns request assembly, provider stream validation, live run ownership, approval advancement, and bounded progression. The service derives requests from committed history and awaits the required model/tool writes before dependent dispatch. Controlled providers exercise this interface without network model calls; vendor serialization, credentials, and product transport remain separate work.
+
 ## Verification boundary
 
-The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, and approved file/shell execution without a live model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
+The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, approved file/shell execution, and the controlled-provider loop without a network model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
 
 The separate [foundation acceptance driver and viewer](execution-foundation-acceptance.md) live in the server package as contributor verification tools. They produce a static, inspectable report from real effects and saved events using scripted model declarations. The read-only viewer has no execution endpoints and is not the product HTTP/SSE service; the report renderer is not the React Chat/Trace application.
+
+The [Agent Loop acceptance driver](agent-loop-acceptance.md) adds a controlled provider over the production loop and reuses the static report renderer. It captures actual provider requests and real approved effects instead of scripting lifecycle events.
