@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns the remaining architectural decisions and acceptance conditions.
+This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified architectural decisions; the [execution service and Web proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md) owns the remaining integration decisions and acceptance conditions.
 
 ## Composition
 

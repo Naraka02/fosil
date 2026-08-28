@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the bounded Linux shell executor, retained process output, and live cleanup behavior. The [shared tool service](tool-execution.md) owns approval, durable dispatch, and result persistence; the [shell invocation schema](../packages/contracts/src/tools.ts) owns argument validation. The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and remaining release requirements.
+This reference owns the bounded Linux shell executor, retained process output, and live cleanup behavior. The [shared tool service](tool-execution.md) owns approval, durable dispatch, and result persistence; the [shell invocation schema](../packages/contracts/src/tools.ts) owns argument validation. The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Invocation boundary
 

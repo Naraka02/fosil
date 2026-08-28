@@ -8,7 +8,7 @@ fosil needs a bounded coding workflow before selecting a runtime or combining im
 
 ## Proposal
 
-The maintainer approved the [first-release scope and acceptance requirements](../../../../docs/product-scope.md). This note remains proposed because the product is not implemented or verified. It owns the reference choices and rationale; the scope document owns the user-visible requirements. The [execution foundations proposal](../architecture/2026-08-27-execution-foundations.md) owns the detailed proposed contracts, technology choices, and implementation slices.
+The maintainer approved the [first-release scope and acceptance requirements](../../../../docs/product-scope.md). This note remains proposed because the product is not implemented or verified. It owns the reference choices and rationale; the scope document owns the user-visible requirements. The [implemented Foundation note](../../implemented/architecture/2026-08-27-execution-foundations.md) owns the verified lower-level decisions and evidence; the [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md) owns the dependent contracts and remaining implementation slices.
 
 Use an independent execution core, a durable session event record, and separate Chat and Trace projections. Adopt responsibility boundaries and mechanisms rather than transplanting either reference system wholesale. The roles below are design constraints, not selected class names, a package layout, or a technology stack.
 
@@ -40,7 +40,7 @@ The public reference is DeepSeek Harness at revision `b150a551b8d465e31e418e1b2e
 
 ### Decisions still required
 
-The [execution foundations proposal](../architecture/2026-08-27-execution-foundations.md#confirmation-and-remaining-decisions) records the effective foundation decisions and the remaining persistence, reconnect, execution-service, and limit proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
+The [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md#confirmation-and-remaining-decisions) records the remaining loop, retention, reconnect, execution-service, and limit proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
 
 ## Alternatives considered
 
@@ -60,7 +60,7 @@ Implementation acceptance is defined solely by the [workflow and failure-path ch
 
 ### Verification sequence
 
-The [implementation slices](../architecture/2026-08-27-execution-foundations.md#implementation-slices) define dependency order and observable evidence from bootstrap through real-provider acceptance. The foundation note records verified slice evidence, and the [development guide](../../../../docs/development.md#available-tooling) owns available commands. Passing foundation checks does not satisfy the complete product workflow; the scope document remains the owner of release acceptance.
+The [remaining implementation slices](../architecture/2026-08-27-execution-service-and-web.md#implementation-slices) define dependency order and observable evidence from the controlled-provider loop through real-provider acceptance. The [Foundation note](../../implemented/architecture/2026-08-27-execution-foundations.md#verification) records completed lower-level evidence, and the [development guide](../../../../docs/development.md#available-tooling) owns available commands. Passing foundation checks does not satisfy the complete product workflow; the scope document remains the owner of release acceptance.
 
 ## Risks
 

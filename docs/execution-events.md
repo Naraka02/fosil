@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the shared event contract and pure execution-state reduction boundary. The [contract schemas](../packages/contracts/src/index.ts) own event shapes and inferred TypeScript types, and the [core entry point](../packages/core/src/index.ts) exposes state reduction. The [architecture reference](architecture.md) owns package composition; the [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and the remaining execution-service and release requirements.
+This reference owns the shared event contract and pure execution-state reduction boundary. The [contract schemas](../packages/contracts/src/index.ts) own event shapes and inferred TypeScript types, and the [core entry point](../packages/core/src/index.ts) exposes state reduction. The [architecture reference](architecture.md) owns package composition; the [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Validation and ordering
 

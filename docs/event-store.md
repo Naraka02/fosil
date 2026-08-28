@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns durable storage, command acceptance, and the worker boundary. The [shared schemas](../packages/contracts/src/index.ts) own command and acknowledgement shapes; the [execution-event reference](execution-events.md) owns event and reducer semantics. The [architecture reference](architecture.md) owns composition, and the [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and remaining service decisions.
+This reference owns durable storage, command acceptance, and the worker boundary. The [shared schemas](../packages/contracts/src/index.ts) own command and acknowledgement shapes; the [execution-event reference](execution-events.md) owns event and reducer semantics. The [architecture reference](architecture.md) owns composition, and the [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Store interface
 

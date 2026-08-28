@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the shared tool service, approval progression, cancellation observation, and persistence ordering. The [file-tool reference](file-tools.md) owns direct file access and edit evidence; the [shell-tool reference](shell-tools.md) owns process execution, output, and cleanup. The [event store](event-store.md) owns command acceptance, and the [execution-event reference](execution-events.md) owns lifecycle invariants. The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns the decisions and remaining product work.
+This reference owns the shared tool service, approval progression, cancellation observation, and persistence ordering. The [file-tool reference](file-tools.md) owns direct file access and edit evidence; the [shell-tool reference](shell-tools.md) owns process execution, output, and cleanup. The [event store](event-store.md) owns command acceptance, and the [execution-event reference](execution-events.md) owns lifecycle invariants. The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Service boundary
 

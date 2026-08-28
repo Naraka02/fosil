@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns direct filesystem access, managed-edit evidence, and file-tool bounds. The [shared file-tool schemas](../packages/contracts/src/file-tools.ts) own argument validation and provider-facing JSON Schema definitions. The [event reference](execution-events.md) owns lifecycle semantics, and the [event store](event-store.md) owns durable command acceptance. The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and the remaining execution and release work.
+This reference owns direct filesystem access, managed-edit evidence, and file-tool bounds. The [shared file-tool schemas](../packages/contracts/src/file-tools.ts) own argument validation and provider-facing JSON Schema definitions. The [event reference](execution-events.md) owns lifecycle semantics, and the [event store](event-store.md) owns durable command acceptance. The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Service boundary
 

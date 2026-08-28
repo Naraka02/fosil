@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns recovery planning, startup admission, workspace uncertainty, and the provider-neutral history projection. The [execution-event reference](execution-events.md) owns event lifecycle semantics, and the [event-store reference](event-store.md) owns persistence, command receipts, and history paging. The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns rationale and remaining execution decisions.
+This reference owns recovery planning, startup admission, workspace uncertainty, and the provider-neutral history projection. The [execution-event reference](execution-events.md) owns event lifecycle semantics, and the [event-store reference](event-store.md) owns persistence, command receipts, and history paging. The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the verified decisions and their rationale.
 
 ## Recovery planning
 
