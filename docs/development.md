@@ -26,7 +26,7 @@ The [architecture reference](architecture.md) defines the implemented boundaries
 
 On WSL, ensure `TMPDIR` names an existing, writable Linux directory. If the shell inherits an unavailable Windows temporary path, run the test and probe commands with `TMPDIR=/tmp`; no change to the system default Node installation is required.
 
-Storage ownership tests create local child processes and terminate their own fixture process. If the execution sandbox prevents observing child-process output, rerun the affected tests with the required permission; a timeout or missing result is not a passed ownership check.
+Storage ownership and shell-runner tests create local child processes and terminate their own fixture processes. Shell checks require Linux with readable procfs and exercise stopped bootstraps, process-group signalling, and bounded cleanup. If the execution sandbox prevents observing child-process output, rerun the affected tests with the required permission; a timeout or missing result is not a passed ownership check.
 
 ## Working sequence
 

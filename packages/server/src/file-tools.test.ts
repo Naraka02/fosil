@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fileToolDefinitions, parseEventInput, parseFileToolInvocation, type Event, type EventInput, type JsonValue } from "@fosil/contracts";
+import { fileToolDefinitions, toolDefinitions, parseEventInput, parseFileToolInvocation, type Event, type EventInput, type JsonValue } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { FileToolService, type FileToolServiceOptions, type ToolAdvance } from "./file-tool-service.js";
+import { ToolService } from "./tool-service.js";
 import { executeFileTool, ToolCancelled } from "./file-tools.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
 
@@ -18,6 +19,8 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 class HookStore extends SqliteWorkerStore {
   beforeAppend: ((events: readonly EventInput[]) => Promise<void>) | undefined;
   afterAppend: ((events: Event[]) => Promise<void>) | undefined;
+  beforeRead: (() => Promise<void>) | undefined;
+  override async read(sessionId: string) { await this.beforeRead?.(); return super.read(sessionId); }
   override async appendBatch(events: readonly EventInput[]) {
     await this.beforeAppend?.(events);
     const result = await super.appendBatch(events);
@@ -35,7 +38,7 @@ async function directory() {
   directories.push(path);
   return path;
 }
-async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = []) {
+async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService) {
   const root = await directory();
   const store = new HookStore(new URL("../dist/storage-worker.js", import.meta.url));
   stores.push(store);
@@ -51,7 +54,7 @@ async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt
   await store.appendBatch([
     input("step.started", { run_id: runId, step: 1 }),
     input("model.request.started", { ...correlation, origin: "runner", request: {
-      provider: "fixture", model: "fixture", system_instructions: [], messages: [], tools: fileToolDefinitions(),
+      provider: "fixture", model: "fixture", system_instructions: [], messages: [], tools: Service === FileToolService ? fileToolDefinitions() : toolDefinitions(),
       settings: { temperature: null, top_p: null, max_output_tokens: null }
     } }),
     input("model.request.finished", { ...correlation, origin: "provider", status: "succeeded", reason: "completed", stop_reason: "tool_calls",
@@ -60,7 +63,7 @@ async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt
       timings: { first_content_ms: null, duration_ms: null }, error: null
     })
   ]);
-  const service = new FileToolService(store, options);
+  const service = new Service(store, options);
   const callId = await service.prepare(sessionId, runId, "provider-call");
   const advance = () => service.advance(sessionId, runId, callId);
   const decide = async (decision: "allow" | "deny") => {
@@ -400,5 +403,155 @@ describe("bounded file execution", () => {
     expect(await readFile(join(outside, "file"), "utf8")).toBe("outside");
     expect(await readdir(join(root, "moved"))).toEqual(["file"]);
     expect(await readFile(join(root, "moved", "file"), "utf8")).toBe("before");
+  });
+});
+
+async function shellFixture(args: JsonValue, options: FileToolServiceOptions = {}) {
+  return fixture("shell", args, options, [], ToolService);
+}
+async function waitForFixtureFile(path: string) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (await stat(path).then(() => true, () => false)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("Shell fixture did not become ready");
+}
+async function expectFixtureStopped(pid: number) {
+  const metadata = await readFile(`/proc/${pid}/stat`, "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (metadata !== null) expect(["Z", "X"]).toContain(metadata.slice(metadata.lastIndexOf(")") + 2).split(" ")[0]);
+}
+
+describe("shell service integration", () => {
+  it("preserves the file-only entry point without enabling shell execution", async () => {
+    const f = await fixture("shell", { command: "printf unexpected > marker" });
+    expect(finished(await f.advance()).data.reason).toBe("validation_failed");
+    expect((await f.store.read(f.sessionId)).some((event) => event.type === "tool.started")).toBe(false);
+    await expect(stat(join(f.root, "marker"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("requires a saved allowance, persists the actual exit, and does not repeat shell effects", async () => {
+    const f = await shellFixture({ command: "printf effect >> marker; printf output; printf error >&2; exit 7" });
+    expect(await f.advance()).toMatchObject({ status: "waiting_for_approval" });
+    await expect(stat(join(f.root, "marker"))).rejects.toMatchObject({ code: "ENOENT" });
+    await f.decide("allow");
+    const result = finished(await f.advance());
+    expect(result.data).toMatchObject({ status: "failed", reason: "tool_failed", exit_code: 7 });
+    expect(result.data.result).not.toBeNull();
+    expect(result.data.evidence.kind).toBe("command");
+    expect(finished(await f.advance())).toEqual(result);
+    expect(await readFile(join(f.root, "marker"), "utf8")).toBe("effect");
+    const events = await f.store.read(f.sessionId);
+    const allowed = events.find((event) => event.type === "approval.resolved")!;
+    const started = events.find((event) => event.type === "tool.started")!;
+    expect(allowed.seq).toBeLessThan(started.seq);
+    expect(started.seq).toBeLessThan(result.seq);
+  });
+
+  it("executes valid surrogate pairs without changing the recorded command", async () => {
+    const command = "printf '\ud83d\ude00'";
+    const f = await shellFixture({ command });
+    await f.advance(); await f.decide("allow");
+    expect(finished(await f.advance()).data.result).toMatchObject({ command, stdout: { text: "\ud83d\ude00" } });
+  });
+
+  it.each(["deny", "expire", "cancel"])("does not spawn on shell %s", async (action) => {
+    let now = new Date();
+    const f = await shellFixture({ command: "printf unexpected > marker" }, { now: () => now });
+    await f.advance();
+    if (action === "deny") await f.decide("deny");
+    if (action === "cancel") await f.cancel();
+    if (action === "expire") now = new Date(now.getTime() + 300_001);
+    expect(finished(await f.advance()).data.status).toBe(action === "cancel" ? "cancelled" : "denied");
+    expect((await f.store.read(f.sessionId)).some((event) => event.type === "tool.started")).toBe(false);
+    await expect(stat(join(f.root, "marker"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    { command: "" }, { command: "bad\0command" }, { command: "echo \ud800" }, { command: "true", cwd: "/tmp" },
+    { command: "true", timeout_ms: 0 }, { command: "true", timeout_ms: 120_001 }
+  ])("rejects invalid shell arguments before requesting approval: %j", async (args) => {
+    const f = await shellFixture(args);
+    expect(finished(await f.advance()).data.reason).toBe("validation_failed");
+    expect((await f.store.read(f.sessionId)).some((event) => ["tool.started", "approval.requested"].includes(event.type))).toBe(false);
+  });
+
+  it("settles durable cancellation only after the running shell stops", async () => {
+    const f = await shellFixture({ command: "echo $$ > pid; printf ready > marker; while :; do sleep 1; done", timeout_ms: 2_000 });
+    await f.advance(); await f.decide("allow");
+    const execution = f.advance();
+    try {
+      await waitForFixtureFile(join(f.root, "marker"));
+      await f.cancel();
+      const result = finished(await execution);
+      expect(result.data).toMatchObject({ status: "cancelled", reason: "cancel_requested" });
+      await expectFixtureStopped(Number(await readFile(join(f.root, "pid"), "utf8")));
+    } finally { await Promise.allSettled([execution]); }
+  });
+
+  it("records timeout as failure without fabricating cancellation intent", async () => {
+    const f = await shellFixture({ command: "sleep 10", timeout_ms: 200 });
+    await f.advance(); await f.decide("allow");
+    expect(finished(await f.advance()).data).toMatchObject({ status: "failed", reason: "timeout" });
+    expect(replay(await f.store.read(f.sessionId)).runs.get(f.runId)!.cancelRequested).toBe(false);
+  });
+
+  it("stops the shell on state-monitor failure and leaves dispatch unresolved", async () => {
+    const f = await shellFixture({ command: "echo $$ > pid; printf ready > marker; while :; do sleep 1; done", timeout_ms: 2_000 });
+    await f.advance(); await f.decide("allow");
+    f.store.beforeRead = async () => {
+      if (await stat(join(f.root, "marker")).then(() => true, () => false)) throw new StoreError("fixture_storage_failure", "Injected monitor failure");
+    };
+    await expect(f.advance()).rejects.toMatchObject({ code: "fixture_storage_failure" });
+    f.store.beforeRead = undefined;
+    expect(replay(await f.store.read(f.sessionId)).runs.get(f.runId)!.tools.get(f.callId)!.status).toBe("running");
+    await expectFixtureStopped(Number(await readFile(join(f.root, "pid"), "utf8")));
+    expect(await f.advance()).toEqual({ status: "in_progress", callId: f.callId });
+  });
+
+  it("persists shell cleanup uncertainty and blocks the workspace", async () => {
+    const f = await shellFixture({ command: "exit 0" });
+    await f.advance(); await f.decide("allow");
+    vi.spyOn(fs, "readdir").mockRejectedValueOnce(Object.assign(new Error("Injected process inspection failure"), { code: "EIO" }));
+    expect(finished(await f.advance()).data).toMatchObject({ status: "failed", reason: "cleanup_failed", evidence: { kind: "unknown" } });
+    expect(workspaceBlockers(replay(await f.store.read(f.sessionId)))).not.toHaveLength(0);
+    const other = await f.store.execute({ type: "session.create", command_id: "other-session", workspace_root: f.root });
+    await expect(f.store.execute({ type: "run.submit", command_id: "other-run", session_id: other.session_id, content: "Continue" })).rejects.toMatchObject({ code: "workspace_blocked" });
+  });
+
+  it("does not spawn if shell dispatch fails to persist", async () => {
+    const f = await shellFixture({ command: "printf unexpected > marker" });
+    await f.advance(); await f.decide("allow");
+    f.store.beforeAppend = async (events) => { if (events.some((event) => event.type === "tool.started")) throw new StoreError("fixture_storage_failure", "Injected dispatch failure"); };
+    await expect(f.advance()).rejects.toMatchObject({ code: "fixture_storage_failure" });
+    await expect(stat(join(f.root, "marker"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves shell effects across lost result persistence and never replays them", async () => {
+    const f = await shellFixture({ command: "printf once >> marker" });
+    await f.advance(); await f.decide("allow");
+    f.store.beforeAppend = async (events) => { if (events.some((event) => event.type === "tool.finished")) throw new StoreError("fixture_storage_failure", "Injected result failure"); };
+    await expect(f.advance()).rejects.toMatchObject({ code: "fixture_storage_failure" });
+    expect(await f.advance()).toEqual({ status: "in_progress", callId: f.callId });
+    await f.store.close();
+    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    stores.push(reopened);
+    await reopened.open(f.database);
+    const result = finished(await new ToolService(reopened).advance(f.sessionId, f.runId, f.callId));
+    expect(result.data.status).toBe("interrupted");
+    expect(workspaceBlockers(replay(await reopened.read(f.sessionId)))).not.toHaveLength(0);
+    expect(await readFile(join(f.root, "marker"), "utf8")).toBe("once");
+  });
+
+  it("orders file and shell calls through one durable dispatch boundary", async () => {
+    const f = await fixture("shell", { command: "printf verified > target.txt" }, {}, [{ name: "read_file", arguments: { path: "target.txt" }, provider_call_id: "read" }], ToolService);
+    const read = await f.service.prepare(f.sessionId, f.runId, "read");
+    await expect(f.service.advance(f.sessionId, f.runId, read)).rejects.toMatchObject({ code: "tool_order" });
+    await f.advance(); await f.decide("allow");
+    expect(finished(await f.advance()).data.status).toBe("succeeded");
+    expect(finished(await f.service.advance(f.sessionId, f.runId, read)).data.result).toMatchObject({ content: "verified" });
   });
 });

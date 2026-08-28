@@ -1,0 +1,170 @@
+import { randomUUID } from "node:crypto";
+import { toolRequiresApproval, parseEventInput, parseToolInvocation, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
+import { replay, type RunState, type ToolState } from "@fosil/core";
+import { executeFileTool, FileToolError, ToolCancelled } from "./file-tools.js";
+import { executeShellTool } from "./shell-tools.js";
+import { SqliteWorkerStore, StoreError } from "./store.js";
+
+type Finished = Extract<Event, { type: "tool.finished" }>;
+type FinishedData = Finished["data"];
+export type ToolAdvance = { status: "finished"; event: Finished }
+  | { status: "waiting_for_approval"; approvalId: string; expiresAt: string }
+  | { status: "in_progress"; callId: string };
+export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number }
+const unsettled = (tool: ToolState) => ["created", "waiting_for_approval", "running"].includes(tool.status);
+
+/** Trusted local service; callers cannot supply operation arguments, policy, or cwd. */
+export class ToolService {
+  private readonly now: () => Date;
+  private readonly ttl: number;
+  private readonly operations = new Map<string, Promise<unknown>>();
+
+  constructor(private readonly store: SqliteWorkerStore, options: ToolServiceOptions = {}) {
+    this.now = options.now ?? (() => new Date());
+    this.ttl = options.approvalTtlMs ?? 300_000;
+    if (!Number.isSafeInteger(this.ttl) || this.ttl < 1 || this.ttl > 86_400_000) throw new Error("Approval lifetime must be between 1 ms and 24 hours");
+  }
+
+  /** Normalize a declared call in the active step, without executing it. */
+  prepare(sessionId: string, runId: string, providerCallId: string): Promise<string> {
+    return this.coalesce(JSON.stringify(["prepare", sessionId, runId, providerCallId]), async () => {
+      const { state, run } = await this.load(sessionId, runId);
+      const step = run.activeStep === null ? undefined : run.steps.get(run.activeStep);
+      if (!step || state.activeRunId !== runId) throw new StoreError("inactive_run", "Run has no active step");
+      const existing = step.callIds.map((id) => run.tools.get(id)!).find((call) => call.providerCallId === providerCallId);
+      if (existing) return existing.callId;
+      const request = run.requests.get(step.requestIds.at(-1) ?? "");
+      const declared = request?.output?.tool_calls[step.callIds.length];
+      if (request?.status !== "succeeded" || !declared || declared.provider_call_id !== providerCallId) {
+        throw new StoreError("wrong_correlation", "Only the next complete model tool call can be prepared");
+      }
+      const callId = randomUUID();
+      const gated = this.requiresApproval(declared.name);
+      await this.store.append(this.input(sessionId, "tool.call.created", {
+        run_id: runId, step: step.step, request_id: request.requestId, attempt: request.attempt,
+        call_id: callId, provider_call_id: providerCallId, tool_name: declared.name, arguments: declared.arguments,
+        cwd: state.workspaceRoot, requires_approval: gated, approval_id: gated ? randomUUID() : null, origin: "runner"
+      }));
+      return callId;
+    });
+  }
+
+  advance(sessionId: string, runId: string, callId: string): Promise<ToolAdvance> {
+    return this.coalesce(JSON.stringify(["advance", sessionId, runId, callId]), () => this.advanceOnce(sessionId, runId, callId));
+  }
+
+  private async advanceOnce(sessionId: string, runId: string, callId: string): Promise<ToolAdvance> {
+    const { state, run, events } = await this.load(sessionId, runId);
+    const call = run.tools.get(callId);
+    if (!call) throw new StoreError("missing_call", "Tool call does not exist in this run");
+    if (!unsettled(call)) {
+      const event = events.find((event): event is Finished => event.type === "tool.finished" && event.data.run_id === runId && event.data.call_id === callId);
+      if (!event) throw new StoreError("missing_result", "Settled tool has no recorded result");
+      return { status: "finished", event };
+    }
+    // A recorded start is never treated as permission to resume or repeat an effect.
+    if (call.started) return { status: "in_progress", callId };
+    if (state.activeRunId !== runId) throw new StoreError("inactive_run", "Run is no longer active");
+    if ([...run.tools.values()].find(unsettled)?.callId !== callId) throw new StoreError("tool_order", "An earlier tool call must settle first");
+    if (call.cwd !== state.workspaceRoot || call.requiresApproval !== this.requiresApproval(call.toolName)) {
+      throw new StoreError("policy_mismatch", "Recorded call does not match the tool policy or workspace");
+    }
+    const common = { run_id: runId, step: call.step, request_id: call.requestId, attempt: call.attempt, call_id: callId, approval_id: call.approvalId };
+    const frozen = { ...common, tool_name: call.toolName, arguments: call.arguments, cwd: call.cwd };
+    const finish = (outcome: Partial<FinishedData> & Pick<FinishedData, "status" | "reason">, prefix: EventInput[] = []): Promise<ToolAdvance> => this.finish(sessionId, {
+      ...common, tool_name: call.toolName, cwd: call.cwd, result: null, error: null, evidence: { kind: "none", data: null },
+      timings: { first_content_ms: null, duration_ms: null }, exit_code: null, origin: "runner", ...outcome
+    }, prefix);
+    const approval = call.approvalId === null ? undefined : run.approvals.get(call.approvalId);
+    if (run.cancelRequested) {
+      const prefix = approval?.status === "pending" ? [this.input(sessionId, "approval.resolved", {
+        ...common, status: "cancelled", reason: "cancel_requested", origin: "system"
+      })] : [];
+      return finish({ status: "cancelled", reason: "cancel_requested" }, prefix);
+    }
+    if (approval?.status === "denied" || approval?.status === "expired") return finish({ status: "denied", reason: approval.status });
+    let invocation;
+    try { invocation = this.parseInvocation({ name: call.toolName, arguments: call.arguments }); }
+    catch {
+      return finish({ status: "failed", reason: "validation_failed", error: { code: "invalid_arguments", message: "Unknown tool or invalid arguments", details: null } });
+    }
+    if (call.requiresApproval && !approval) {
+      const expiresAt = new Date(this.now().getTime() + this.ttl).toISOString();
+      await this.store.append(this.input(sessionId, "approval.requested", { ...frozen, policy: "allow_once", expires_at: expiresAt, origin: "runner" }));
+      return { status: "waiting_for_approval", approvalId: call.approvalId!, expiresAt };
+    }
+    if (approval?.status === "pending") {
+      if (this.now().getTime() < Date.parse(approval.request.expires_at)) {
+        return { status: "waiting_for_approval", approvalId: approval.approvalId, expiresAt: approval.request.expires_at };
+      }
+      return finish({ status: "denied", reason: "expired" }, [this.input(sessionId, "approval.resolved", {
+        ...common, status: "expired", reason: "expired", origin: "system"
+      })]);
+    }
+    const protectedFiles = this.store.protectedFiles;
+    await this.store.append(this.input(sessionId, "tool.started", { ...frozen, origin: "runner" }));
+    const startedAt = performance.now();
+    let outcome: Partial<FinishedData> & Pick<FinishedData, "status" | "reason">;
+    try {
+      const beforeEffect = async () => {
+        // Normalize every monitor failure so it cannot become a fabricated tool result.
+        let current;
+        try { current = await this.load(sessionId, runId); }
+        catch (error) {
+          throw error instanceof StoreError ? error : new StoreError("state_unavailable", "Cannot verify durable dispatch state");
+        }
+        if (current.run.cancelRequested) throw new ToolCancelled();
+        if (current.state.activeRunId !== runId || current.run.tools.get(callId)?.status !== "running") {
+          throw new StoreError("inactive_dispatch", "Dispatch is no longer active");
+        }
+      };
+      if (invocation.name === "shell") outcome = await executeShellTool(call.cwd, invocation, beforeEffect);
+      else {
+        const executed = await executeFileTool(call.cwd, invocation, protectedFiles, beforeEffect);
+        outcome = { status: "succeeded", reason: "completed", ...executed };
+      }
+    } catch (error) {
+      // Persistence failures are not tool outcomes. Leave the dispatched call unresolved.
+      if (error instanceof StoreError) throw error;
+      if (error instanceof ToolCancelled) outcome = { status: "cancelled", reason: "cancel_requested" };
+      else {
+        const uncertain = invocation.name === "shell" || (error instanceof FileToolError && error.uncertain);
+        outcome = {
+          status: "failed", reason: uncertain ? "cleanup_failed" : "tool_failed",
+          error: { code: error instanceof FileToolError ? error.code : invocation.name === "shell" ? "shell_runner" : "file_io", message: error instanceof FileToolError ? error.message : "Tool operation failed", details: null },
+          evidence: uncertain ? { kind: "unknown", data: { outcome: "unknown", inspection_required: true } } : { kind: "none", data: null }
+        };
+      }
+    }
+    // A cancellation after replacement does not erase the observed successful effect.
+    return finish({ ...outcome, timings: { first_content_ms: null, duration_ms: performance.now() - startedAt } });
+  }
+
+  protected parseInvocation(value: unknown): ToolInvocation { return parseToolInvocation(value); }
+  protected requiresApproval(name: string): boolean { return toolRequiresApproval(name); }
+
+  private async finish(sessionId: string, data: FinishedData, prefix: EventInput[]): Promise<ToolAdvance> {
+    const events = await this.store.appendBatch([...prefix, this.input(sessionId, "tool.finished", data)]);
+    return { status: "finished", event: events.at(-1)! as Finished };
+  }
+
+  private async load(sessionId: string, runId: string) {
+    const events = await this.store.read(sessionId);
+    const state = replay(events);
+    const run: RunState | undefined = state.runs.get(runId);
+    if (!run) throw new StoreError("missing_run", "Run does not exist in this session");
+    return { state, run, events };
+  }
+
+  private input(sessionId: string, type: EventInput["type"], data: unknown): EventInput {
+    return parseEventInput({ schema_version: 1, session_id: sessionId, recorded_at: this.now().toISOString(), type, data });
+  }
+
+  private coalesce<T>(key: string, action: () => Promise<T>): Promise<T> {
+    const existing = this.operations.get(key);
+    if (existing) return existing as Promise<T>;
+    const operation = action().finally(() => { this.operations.delete(key); });
+    this.operations.set(key, operation);
+    return operation;
+  }
+}

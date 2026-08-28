@@ -14,7 +14,9 @@ This page routes readers to the owner of a topic. It is not a progress tracker o
 | Understand event validation and state transitions | [Execution events and state reduction](execution-events.md) |
 | Understand durable command acceptance and storage | [Event store and command acceptance](event-store.md) |
 | Understand restart and future model-history construction | [Startup recovery and model history](recovery.md) |
-| Understand direct file execution and approvals | [File tools and approval dispatch](file-tools.md) |
+| Understand tool approvals and durable dispatch | [Tool execution](tool-execution.md) |
+| Understand direct file access and edit evidence | [File tools](file-tools.md) |
+| Understand shell output and live process cleanup | [Shell tools](shell-tools.md) |
 | Begin an agent-assisted task | [Repository instructions](../AGENTS.md), then instructions in the affected subtree |
 | Make and verify a change | [Development guide](development.md) |
 | Place or edit documentation | [Documentation standard](AGENTS.md) |

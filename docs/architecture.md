@@ -2,15 +2,15 @@
 
 Document type: reference.
 
-This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file tools, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns the remaining architectural decisions and acceptance conditions.
+This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, and a browser probe, not the complete workflow defined by the [product scope](product-scope.md). The [execution foundations proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-foundations.md) owns the remaining architectural decisions and acceptance conditions.
 
 ## Composition
 
 | Package | Responsibility | Boundary |
 | --- | --- | --- |
-| [contracts](../packages/contracts/src/index.ts) | Shared event/command/file-tool schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
+| [contracts](../packages/contracts/src/index.ts) | Shared event/command/tool schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
 | [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, and provider-neutral history projection | Depends on contracts; no agent loop, provider, or tool execution yet |
-| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, and approved file execution | Native database access stays in a Node worker; file I/O stays in the server; no agent loop, shell runner, or HTTP routes yet |
+| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, and approved file/shell execution | Native database access stays in a Node worker; file/process I/O stays in the server; no agent loop or HTTP routes yet |
 | [web](../packages/web/src/App.tsx) | Browser probe of the shared event schema | Depends on contracts, not core or server; no Chat or Trace interface yet |
 
 The shared schemas are the source of truth for event shapes; the [execution-event reference](execution-events.md) owns ordering, lifecycle, and reduction semantics. Runtime parsing rejects invalid values; TypeScript types alone are not a validation boundary. The browser uses fixed examples to demonstrate event-union consumption and does not create a session.
@@ -21,10 +21,10 @@ Shared workspace schema validation checks an absolute Linux path prefix only. Th
 
 The [event-store reference](event-store.md) owns the asynchronous worker interface, transactions, payload storage, receipts, paging, request limits, and exclusive ownership. The [recovery reference](recovery.md) owns startup admission and uncertainty handling. The worker uses shared schemas and the core reducer inside its persistence boundary. Its command handler accepts user intent but does not drive effects. Recovery never automatically resumes interrupted work or establishes exactly-once external effects.
 
-## File execution boundary
+## Tool execution boundary
 
-The [file-tool reference](file-tools.md) owns direct reads, single-file literal search, managed replacement, permission dispatch, filesystem guards, and evidence. The service consumes persisted declarations and commits dispatch before I/O. Replay and the storage worker never execute file tools. This service is not an operating-system sandbox or a complete coding-agent loop.
+The [tool-service reference](tool-execution.md) owns shared approval, cancellation observation, and durable dispatch. The [file-tool reference](file-tools.md) owns direct-file guards and managed-edit evidence; the [shell-tool reference](shell-tools.md) owns bounded output and live process cleanup. The service consumes persisted declarations and commits dispatch before I/O. Replay and the storage worker never execute tools. This service is not an operating-system sandbox or a complete coding-agent loop.
 
 ## Verification boundary
 
-The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, and approved file execution without a live model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
+The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, and approved file/shell execution without a live model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
