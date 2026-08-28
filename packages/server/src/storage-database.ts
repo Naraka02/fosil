@@ -27,7 +27,7 @@ const schema = `
 `;
 
 function canonicalDatabasePath(path: string): string {
-  if (!isAbsolute(path) || path.startsWith("//")) throw new StoreError("invalid_path", "Database requires an absolute local Linux file path");
+  if (!isAbsolute(path) || path.startsWith("//") || /[\0\uD800-\uDFFF]/u.test(path)) throw new StoreError("invalid_path", "Database requires an absolute local Linux file path with well-formed Unicode and no NUL");
   try {
     const stat = statSync(path);
     if (!stat.isFile() || stat.nlink !== 1) throw new StoreError("invalid_path", "Database must be a regular file without hard-link aliases");

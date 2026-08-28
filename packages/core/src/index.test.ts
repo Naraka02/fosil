@@ -22,6 +22,8 @@ describe("shared event contract", () => {
     ["empty session identity", { ...validEvent, session_id: "" }],
     ["incomplete payload", { ...validEvent, data: { workspace_root: "" } }],
     ["relative workspace root", { ...validEvent, data: { ...validEvent.data, workspace_root: "relative" } }],
+    ["NUL in workspace root", { ...validEvent, data: { ...validEvent.data, workspace_root: "/tmp/bad\0path" } }],
+    ["unpaired surrogate in workspace root", { ...validEvent, data: { ...validEvent.data, workspace_root: "/tmp/\ud800" } }],
     ["non-UTC timestamp", { ...validEvent, recorded_at: "2026-08-27T08:00:00+08:00" }],
     ["unexpected envelope field", { ...validEvent, extra: true }]
   ])("rejects %s", (_description, value) => {

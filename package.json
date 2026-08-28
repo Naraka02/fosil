@@ -18,7 +18,11 @@
     "test": "vitest run",
     "pretest:watch": "tsc -b --pretty false",
     "test:watch": "vitest",
-    "sqlite:probe": "node packages/server/dist/sqlite-probe.js"
+    "sqlite:probe": "node packages/server/dist/sqlite-probe.js",
+    "preacceptance:foundation": "tsc -b --pretty false",
+    "acceptance:foundation": "node packages/server/dist/foundation-cli.js",
+    "preacceptance:serve": "tsc -b --pretty false",
+    "acceptance:serve": "node packages/server/dist/foundation-viewer-cli.js"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

@@ -380,6 +380,19 @@ describe("SQLite worker store", () => {
     await expect(store.execute({ ...command, command_id: "invalid", workspace_root: path })).rejects.toMatchObject({ code: "invalid_workspace" });
     await expect(store.execute({ ...command, command_id: "missing", workspace_root: alias })).rejects.toThrow();
     await expect(store.execute({ type: "run.submit", command_id: "x", session_id: ack.session_id, content: "", extra: true } as Command)).rejects.toThrow();
+    const unicode = join(dirname(path), "workspace-😀");
+    await mkdir(unicode);
+    const validUnicode = await store.execute({ type: "session.create", command_id: "unicode", workspace_root: unicode });
+    expect(await store.getSession(validUnicode.session_id)).toMatchObject({ workspace_root: unicode });
+    await mkdir(join(dirname(path), "alias-�"));
+    await expect(store.execute({ type: "session.create", command_id: "invalid-unicode", workspace_root: join(dirname(path), "alias-\ud800") })).rejects.toThrow();
+  });
+
+  it("rejects invalid Unicode database names before creating a replacement-character alias", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await expect(store.open(join(dirname(path), "\ud800.db"))).rejects.toMatchObject({ code: "invalid_path" });
+    await expect(readFile(join(dirname(path), "�.db"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rolls back acceptance events and payloads if inserting the command receipt fails", async () => {

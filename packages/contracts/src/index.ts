@@ -9,8 +9,8 @@ const isoTimestamp = z.iso.datetime({ offset: false });
 const id = z.string().min(1);
 const positiveInt = z.number().int().positive();
 const nonnegativeInt = z.number().int().nonnegative();
-const absolutePath = z.string().min(1).refine((value) => value.startsWith("/") && !value.startsWith("//"), {
-  message: "expected an absolute Linux path"
+const absolutePath = z.string().min(1).refine((value) => value.startsWith("/") && !value.startsWith("//") && !/[\0\uD800-\uDFFF]/u.test(value), {
+  message: "expected an absolute Linux path with well-formed Unicode and no NUL"
 });
 
 /** A JSON value is retained as data, never as a serialized class or exception. */

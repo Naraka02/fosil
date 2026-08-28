@@ -10,6 +10,8 @@ This reference owns the shared event contract and pure execution-state reduction
 
 Schema validation establishes shape, not legal history. State reduction additionally checks the session identity, contiguous sequence, parent identities, and lifecycle transitions. A history starts with one `session.created` event at sequence 1. A repeated session creation, skipped sequence, or mismatched correlation is an error rather than an event to silently ignore.
 
+Workspace and tool working-directory fields require an absolute Linux path with a single leading slash, well-formed Unicode, and no NUL. Unpaired UTF-16 surrogates are rejected instead of being silently replaced during filesystem encoding; valid surrogate pairs remain valid. This is syntax validation, not canonicalization or admission to a real directory. Stored events with invalid path text fail validation rather than being rewritten.
+
 A session binds the conversation to its recorded workspace; a run belongs to one accepted user command; a step contains one model request and its requested tools. Request, call, and approval identities are tracked within their run and must retain their step/request correlation. The reducer supports attempt 1 only and does not add automatic retries.
 
 Replaying a history starts from empty state and applies its recorded events in order. This is separate from transport deduplication: a repeated delivery must be handled by a future client transport before it reaches the canonical reducer. A newly sequenced duplicate completion remains an invalid fact, not a second successful settlement.
@@ -24,7 +26,7 @@ State keeps runs and their steps, requests, tools, and approvals in maps keyed b
 
 The reducer permits one active run per session. The accepted user message must belong to that run and its command before a step can begin. Steps are ordered within the run, and requests, tools, and approvals retain their parent correlation. A terminal run cannot be reopened by a late callback; a later user submission needs a new run identity.
 
-Model requests and tool dispatches are sequential. A complete model response can produce multiple tool calls, but those calls must settle in sequence rather than execute concurrently. Stream fragments are recorded output and never authorize tool execution. A failed model request ends normal model dispatch for its run; an ordinary tool failure can become context for another step.
+Within a run, model requests and tool dispatches are sequential. A complete model response can produce multiple tool calls, but those calls must settle in sequence rather than execute concurrently. Stream fragments are recorded output and never authorize tool execution. A failed model request ends normal model dispatch for its run; an ordinary tool failure can become context for another step.
 
 A completed step accounts for every complete tool call returned by its request. A completed run additionally requires a final successful model response with no further tool calls. Finishing tools alone is not a final answer, and a failed child cannot be hidden by a successful run status. Cleanup failure blocks further dispatch in that run and cannot be reported as successful cancellation.
 

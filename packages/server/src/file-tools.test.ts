@@ -38,14 +38,13 @@ async function directory() {
   directories.push(path);
   return path;
 }
-async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService) {
+async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService, shared?: { store: HookStore; database: string; service: ToolService }) {
   const root = await directory();
-  const store = new HookStore(new URL("../dist/storage-worker.js", import.meta.url));
-  stores.push(store);
-  const database = join(root, "events.db");
-  await store.open(database);
+  const store = shared?.store ?? new HookStore(new URL("../dist/storage-worker.js", import.meta.url));
+  const database = shared?.database ?? join(root, "events.db");
+  if (!shared) { stores.push(store); await store.open(database); }
   await writeFile(join(root, "target.txt"), "before\n");
-  const session = await store.execute({ type: "session.create", command_id: "create", workspace_root: root });
+  const session = await store.execute({ type: "session.create", command_id: shared ? `create-${root}` : "create", workspace_root: root });
   const sessionId = session.session_id;
   const run = await store.execute({ type: "run.submit", command_id: "submit", session_id: sessionId, content: "Inspect the fixture" });
   const runId = run.run_id!;
@@ -63,7 +62,7 @@ async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt
       timings: { first_content_ms: null, duration_ms: null }, error: null
     })
   ]);
-  const service = new Service(store, options);
+  const service = shared?.service ?? new Service(store, options);
   const callId = await service.prepare(sessionId, runId, "provider-call");
   const advance = () => service.advance(sessionId, runId, callId);
   const decide = async (decision: "allow" | "deny") => {
@@ -308,8 +307,16 @@ describe("file tool service", () => {
 });
 
 describe("bounded file execution", () => {
-  it.each(["/absolute", "../escape", "sub/../target", "sub//target", "./target", "C:/target", "sub\\target", "target\0.txt", "target\n.txt"])("rejects unsafe path %s", async (path) => {
+  it.each(["/absolute", "../escape", "sub/../target", "sub//target", "./target", "C:/target", "sub\\target", "target\0.txt", "target\n.txt", "bad\ud800.txt", "bad\udc00.txt"])("rejects unsafe path %s", async (path) => {
     expect(() => parseFileToolInvocation({ name: "read_file", arguments: { path } })).toThrow();
+  });
+
+  it("preserves valid Unicode filenames and refuses replacement-character aliases", async () => {
+    const root = await directory();
+    await writeFile(join(root, "valid-😀.txt"), "valid pair");
+    await writeFile(join(root, "alias-�.txt"), "not the requested path");
+    expect((await direct(root, "read_file", { path: "valid-😀.txt" })).result).toMatchObject({ content: "valid pair" });
+    await expect(direct(root, "read_file", { path: "alias-\ud800.txt" })).rejects.toThrow();
   });
 
   it.each([".git", ".agents", ".codex"])("rejects protected directory %s", async (segment) => {
@@ -424,6 +431,121 @@ async function expectFixtureStopped(pid: number) {
   });
   if (metadata !== null) expect(["Z", "X"]).toContain(metadata.slice(metadata.lastIndexOf(")") + 2).split(" ")[0]);
 }
+
+const barrierCommand = (label: "A" | "B", exit = 0) => `printf '%s' "$$" > pid; printf ${label} > ready; while [ ! -f release ]; do sleep 0.02; done; printf ${label} >> result; printf '${label}-stdout'; printf '${label}-stderr' >&2; exit ${exit}`;
+type ToolFixture = Awaited<ReturnType<typeof fixture>>;
+async function sharedPair(aArgs: JsonValue = { command: barrierCommand("A"), timeout_ms: 5000 }) {
+  const a = await fixture("shell", aArgs, {}, [], ToolService);
+  const b = await fixture("shell", { command: barrierCommand("B"), timeout_ms: 5000 }, {}, [], ToolService, a);
+  expect(a.store).toBe(b.store); expect(a.service).toBe(b.service);
+  return { a, b };
+}
+async function allowFixture(f: ToolFixture) { await f.advance(); await f.decide("allow"); }
+async function releaseFixture(f: ToolFixture) { await writeFile(join(f.root, "release"), "release"); }
+async function expectFixtureRunning(f: ToolFixture) {
+  await waitForFixtureFile(join(f.root, "ready"));
+  const pid = Number(await readFile(join(f.root, "pid"), "utf8"));
+  expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+  const metadata = await readFile(`/proc/${pid}/stat`, "utf8");
+  expect(["Z", "X", "x"]).not.toContain(metadata.slice(metadata.lastIndexOf(")") + 2).split(" ")[0]);
+  expect(replay(await f.store.read(f.sessionId)).runs.get(f.runId)!.tools.get(f.callId)!.status).toBe("running");
+  return pid;
+}
+
+describe("shared-service cross-workspace concurrency", () => {
+  it("runs B during A's approval wait, then proves overlapping execution and separate evidence", async () => {
+    const { a, b } = await sharedPair();
+    await a.advance(); await allowFixture(b);
+    const executions: Promise<ToolAdvance>[] = [b.advance()];
+    try {
+      await expectFixtureRunning(b);
+      await expect(stat(join(a.root, "ready"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await a.advance()).toMatchObject({ status: "waiting_for_approval" });
+      await a.decide("allow"); executions.push(a.advance());
+      const aPid = await expectFixtureRunning(a), bPid = await expectFixtureRunning(b);
+      expect(aPid).not.toBe(bPid);
+      await Promise.all([releaseFixture(a), releaseFixture(b)]);
+      const [bDone, aDone] = (await Promise.all(executions)).map(finished);
+      for (const [f, label, event] of [[a, "A", aDone!], [b, "B", bDone!]] as const) {
+        expect(event.data).toMatchObject({ status: "succeeded", cwd: f.root });
+        expect(event.data.result).toMatchObject({ stdout: { text: `${label}-stdout` }, stderr: { text: `${label}-stderr` } });
+        expect(await readFile(join(f.root, "result"), "utf8")).toBe(label);
+        const events = await f.store.read(f.sessionId);
+        expect(events.every((record, index) => record.session_id === f.sessionId && record.seq === index + 1)).toBe(true);
+        expect(events.filter((record) => record.type === "tool.started")).toHaveLength(1);
+        expect(finished(await f.advance())).toEqual(event);
+      }
+      expect(aDone!.data.approval_id).not.toBe(bDone!.data.approval_id);
+    } finally { await Promise.allSettled([releaseFixture(a), releaseFixture(b)]); await Promise.allSettled(executions); }
+  }, 15_000);
+
+  it.each(["cancel", "timeout", "failure"] as const)("keeps B alive and productive when A encounters %s", async (mode) => {
+    const { a, b } = await sharedPair({ command: barrierCommand("A", mode === "failure" ? 7 : 0), timeout_ms: mode === "timeout" ? 1600 : 5000 });
+    await Promise.all([allowFixture(a), allowFixture(b)]);
+    const aExecuting = a.advance(), bExecuting = b.advance();
+    const settled = Promise.allSettled([aExecuting, bExecuting]);
+    try {
+      const aPid = await expectFixtureRunning(a); await expectFixtureRunning(b);
+      if (mode === "cancel") await a.cancel();
+      if (mode === "failure") await releaseFixture(a);
+      expect(finished(await aExecuting).data).toMatchObject({
+        status: mode === "cancel" ? "cancelled" : "failed",
+        reason: mode === "cancel" ? "cancel_requested" : mode === "timeout" ? "timeout" : "tool_failed"
+      });
+      await expectFixtureStopped(aPid); await expectFixtureRunning(b);
+      expect(replay(await b.store.read(b.sessionId)).runs.get(b.runId)!.cancelRequested).toBe(false);
+      await releaseFixture(b);
+      expect(finished(await bExecuting).data.result).toMatchObject({ stdout: { text: "B-stdout" }, stderr: { text: "B-stderr" }, process: { cleanup: "no_running_owned_processes" } });
+      expect(await readFile(join(b.root, "result"), "utf8")).toBe("B");
+    } finally { await Promise.allSettled([releaseFixture(a), releaseFixture(b)]); await settled; }
+  }, 15_000);
+
+  it("recovers one lost result without blocking or repeating the other workspace's completed effect", async () => {
+    const { a, b } = await sharedPair();
+    await Promise.all([allowFixture(a), allowFixture(b)]);
+    a.store.beforeAppend = async (events) => {
+      if (events.some((event) => event.type === "tool.finished" && event.session_id === a.sessionId)) throw new StoreError("fixture_result_failure", "Injected A terminal-write rejection; shared store remains available");
+    };
+    const aExecuting = a.advance(), bExecuting = b.advance();
+    const settled = Promise.allSettled([aExecuting, bExecuting]);
+    let bDone: ReturnType<typeof finished> | undefined;
+    try {
+      await expectFixtureRunning(a); await expectFixtureRunning(b);
+      await Promise.all([releaseFixture(a), releaseFixture(b)]);
+      const results = await settled;
+      expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "fixture_result_failure" } });
+      bDone = finished(await bExecuting);
+      expect(bDone.data.status).toBe("succeeded");
+    } finally { await Promise.allSettled([releaseFixture(a), releaseFixture(b)]); await settled; a.store.beforeAppend = undefined; }
+    await a.store.close();
+    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url)); stores.push(reopened);
+    const recovery = await reopened.open(a.database);
+    expect(recovery.blocked_workspaces.map((blocker) => blocker.workspace_root)).toEqual([a.root]);
+    const resumed = new ToolService(reopened);
+    expect(finished(await resumed.advance(a.sessionId, a.runId, a.callId)).data).toMatchObject({ status: "interrupted", evidence: { kind: "unknown" } });
+    expect(finished(await resumed.advance(b.sessionId, b.runId, b.callId))).toEqual(bDone);
+    await expect(reopened.execute({ type: "run.submit", command_id: "next", session_id: a.sessionId, content: "Blocked" })).rejects.toMatchObject({ code: "workspace_blocked" });
+    expect(await reopened.execute({ type: "run.submit", command_id: "next", session_id: b.sessionId, content: "Still admitted" })).toMatchObject({ session_id: b.sessionId });
+    expect(await readFile(join(a.root, "result"), "utf8")).toBe("A");
+    expect(await readFile(join(b.root, "result"), "utf8")).toBe("B");
+  }, 15_000);
+
+  it("treats shared-store loss as a failure of both operations and cleans both owned processes", async () => {
+    const { a, b } = await sharedPair();
+    await Promise.all([allowFixture(a), allowFixture(b)]);
+    const executions = [a.advance(), b.advance()];
+    const settled = Promise.allSettled(executions);
+    try {
+      const aPid = await expectFixtureRunning(a), bPid = await expectFixtureRunning(b);
+      await a.store.close();
+      const results = await settled;
+      expect(results.every((result) => result.status === "rejected" && result.reason instanceof StoreError)).toBe(true);
+      await expectFixtureStopped(aPid); await expectFixtureStopped(bPid);
+      await expect(stat(join(a.root, "result"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(join(b.root, "result"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await Promise.allSettled([releaseFixture(a), releaseFixture(b)]); await settled; }
+  }, 15_000);
+});
 
 describe("shell service integration", () => {
   it("preserves the file-only entry point without enabling shell execution", async () => {

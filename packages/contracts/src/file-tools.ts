@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const relativeFile = z.string().min(1).max(4096).refine((path) =>
-  !path.includes("\\") && !/[\x00-\x1f\x7f]/.test(path) && !/^[a-z]:/i.test(path)
+  !path.includes("\\") && !/[\x00-\x1f\x7f\uD800-\uDFFF]/u.test(path) && !/^[a-z]:/i.test(path)
   && path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
 "expected a relative file path without traversal");
 const readArguments = z.object({ path: relativeFile }).strict();
