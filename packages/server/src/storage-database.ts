@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { commandAckSchema, historyPageRequestSchema, historyPageSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type Event, type EventInput, type HistoryPage } from "@fosil/contracts";
+import { commandAckSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
 import { applyEvent, planRecovery, replay, workspaceBlockers, type ExecutionState } from "@fosil/core";
 import { StoreError, type RecoveryReport, type SessionSummary } from "./storage-protocol.js";
 
@@ -100,6 +100,16 @@ export class StorageDatabase {
 
   getSession(sessionId: string): SessionSummary | null {
     return this.db.transaction(() => summary(this.load(sessionId).state))();
+  }
+
+  listSessions(raw: unknown): SessionList {
+    const request = sessionListRequestSchema.parse(raw);
+    return this.db.transaction(() => {
+      const rows = this.db.prepare("SELECT session_id FROM sessions WHERE session_id > ? ORDER BY session_id LIMIT ?")
+        .all(request.after ?? "", request.limit + 1) as { session_id: string }[];
+      const sessions = rows.slice(0, request.limit).map((row) => summary(this.load(row.session_id).state));
+      return sessionListSchema.parse({ sessions, next_after: rows.length > request.limit ? rows[request.limit - 1]!.session_id : null });
+    })();
   }
 
   readPage(raw: unknown): HistoryPage {

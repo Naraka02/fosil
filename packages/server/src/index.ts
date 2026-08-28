@@ -8,3 +8,5 @@ export { AgentLoopService } from "./agent-loop.js";
 export type { AgentLoopOptions, LoopOutcome } from "./agent-loop.js";
 export { executeModelRequest, ModelProviderCleanupError } from "./model-provider.js";
 export type { ModelProvider, ModelStreamItem, ModelDelta, ModelRequestOutcome, ModelExecutionOptions } from "./model-provider.js";
+export { ExecutionHttpServer } from "./execution-http.js";
+export type { ExecutionHttpOptions } from "./execution-http.js";

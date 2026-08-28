@@ -257,3 +257,24 @@ export const historyPageSchema = z.object({
 export type HistoryCursor = z.infer<typeof historyCursorSchema>;
 export type HistoryPageRequest = z.input<typeof historyPageRequestSchema>;
 export type HistoryPage = z.infer<typeof historyPageSchema>;
+
+/** Session discovery exposes the same saved index projection as a single-session read. */
+export const sessionSummarySchema = z.object({
+  session_id: id, workspace_root: absolutePath, last_seq: positiveInt, active_run_id: id.nullable(),
+  activity: z.enum(["idle", "running", "waiting_for_approval", "cancelling"])
+}).strict();
+export const sessionListRequestSchema = z.object({ after: id.optional(), limit: positiveInt.max(200).default(100) }).strict();
+export const sessionListSchema = z.object({ sessions: z.array(sessionSummarySchema), next_after: id.nullable() }).strict();
+export type SessionSummary = z.infer<typeof sessionSummarySchema>;
+export type SessionListRequest = z.input<typeof sessionListRequestSchema>;
+export type SessionList = z.infer<typeof sessionListSchema>;
+
+/** HTTP positions are canonical decimal safe integers; no coercion of empty or fractional values. */
+export const sequenceTextSchema = z.string().regex(/^(0|[1-9][0-9]*)$/).refine((value) => Number.isSafeInteger(Number(value)));
+const pageLimitText = sequenceTextSchema.refine((value) => Number(value) >= 1 && Number(value) <= 200);
+export const sessionListQuerySchema = z.object({ after: id.optional(), limit: pageLimitText.optional() }).strict();
+export const historyQuerySchema = z.object({ cursor: z.string().optional(), limit: pageLimitText.optional() }).strict();
+export const streamQuerySchema = z.object({ after: z.string().optional() }).strict();
+export const sessionParamsSchema = z.object({ sessionId: id }).strict();
+export const serviceStatusSchema = z.object({ status: z.enum(["ready", "failed", "stopping"]) }).strict();
+export const apiErrorSchema = z.object({ error: z.object({ code: id, message: z.string() }).strict() }).strict();

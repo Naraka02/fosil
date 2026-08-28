@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { commandAckSchema, historyPageSchema, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest } from "@fosil/contracts";
+import { commandAckSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
 import { isWorkerResponse, StoreError, type RecoveryReport, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
 
 export type StoreEvent = Event;
@@ -92,7 +92,11 @@ export class SqliteWorkerStore {
   }
 
   async getSession(sessionId: string): Promise<SessionSummary | null> {
-    return await this.call({ type: "session", sessionId }) as SessionSummary | null;
+    return sessionSummarySchema.nullable().parse(await this.call({ type: "session", sessionId }));
+  }
+
+  async listSessions(request: SessionListRequest = {}): Promise<SessionList> {
+    return sessionListSchema.parse(await this.call({ type: "sessions", request }));
   }
 
   close(): Promise<void> {

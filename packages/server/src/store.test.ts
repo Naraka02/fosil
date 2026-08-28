@@ -108,6 +108,23 @@ async function childResult(source: string): Promise<{ child: ChildProcess; resul
 }
 
 describe("SQLite worker store", () => {
+  it("lists authoritative session activity after recovery without mutating history, and validates page bounds", async () => {
+    const path = await databasePath(); const store = createStore(); await store.open(path);
+    expect(await store.listSessions()).toEqual({ sessions: [], next_after: null });
+    const session = await createSession(store, path);
+    await store.execute({ type: "run.submit", session_id: session.session_id, command_id: "submit", content: "Inspect" });
+    const live = await store.listSessions();
+    expect(live.sessions[0]).toMatchObject({ session_id: session.session_id, activity: "running", last_seq: 3 });
+    for (const limit of [0, 201, 1.5]) await expect(store.listSessions({ limit })).rejects.toThrow();
+    await expect(store.listSessions({ after: "" })).rejects.toThrow();
+    await store.close(); const reader = createStore(); await reader.open(path);
+    const saved = await reader.read(session.session_id);
+    expect((await reader.listSessions()).sessions).toEqual([await reader.getSession(session.session_id)]);
+    expect((await reader.listSessions()).sessions[0]).toMatchObject({ activity: "idle", active_run_id: null, last_seq: 4 });
+    expect(await reader.listSessions({ after: session.session_id })).toEqual({ sessions: [], next_after: null });
+    expect(await reader.read(session.session_id)).toEqual(saved);
+  });
+
   it("pages a fixed prefix while new events and recovery facts are appended", async () => {
     const path = await databasePath();
     const store = createStore();

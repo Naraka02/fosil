@@ -24,6 +24,7 @@ function dispatch(message: WorkerRequest): unknown {
     case "read": return requireDatabase().read(message.sessionId);
     case "history_page": return requireDatabase().readPage(message.request);
     case "session": return requireDatabase().getSession(message.sessionId);
+    case "sessions": return requireDatabase().listSessions(message.request);
     case "close":
       database?.close();
       database = undefined;

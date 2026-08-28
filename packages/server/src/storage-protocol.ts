@@ -1,4 +1,4 @@
-import type { Command, EventInput, HistoryPageRequest } from "@fosil/contracts";
+import type { Command, EventInput, HistoryPageRequest, SessionListRequest } from "@fosil/contracts";
 import type { WorkspaceBlocker } from "@fosil/core";
 
 export type WorkerCommand =
@@ -8,6 +8,7 @@ export type WorkerCommand =
   | { type: "read"; sessionId: string }
   | { type: "history_page"; request: HistoryPageRequest }
   | { type: "session"; sessionId: string }
+  | { type: "sessions"; request: SessionListRequest }
   | { type: "close" };
 
 export type WorkerRequest = WorkerCommand & { id: number };
@@ -15,13 +16,7 @@ export type WorkerResponse =
   | { id: number; ok: true; value: unknown }
   | { id: number; ok: false; error: { code: string; message: string }; fatal: boolean };
 
-export interface SessionSummary {
-  session_id: string;
-  workspace_root: string;
-  last_seq: number;
-  active_run_id: string | null;
-  activity: "idle" | "running" | "waiting_for_approval" | "cancelling";
-}
+export type { SessionSummary } from "@fosil/contracts";
 
 export interface RecoveryReport {
   recovered_sessions: Array<{ session_id: string; run_id: string; first_seq: number; last_seq: number }>;

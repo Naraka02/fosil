@@ -10,7 +10,7 @@ This reference owns the implemented system composition and dependency boundaries
 | --- | --- | --- |
 | [contracts](../packages/contracts/src/index.ts) | Shared event/command/tool schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
 | [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, provider-neutral history projection and request assembly | Depends on contracts; no timers, storage, provider I/O, or tool execution |
-| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, approved file/shell execution, and live agent-loop ownership | Native database access stays in a Node worker; provider/file/process I/O stays in the server; no real-provider adapter or product HTTP routes yet |
+| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, approved tools, live agent-loop ownership, and local HTTP/SSE | Native database access stays in a Node worker; provider/file/process/network I/O stays in the server; no real-provider adapter or product browser application yet |
 | [web](../packages/web/src/App.tsx) | Browser probe of the shared event schema | Depends on contracts, not core or server; no Chat or Trace interface yet |
 
 The shared schemas are the source of truth for event shapes; the [execution-event reference](execution-events.md) owns ordering, lifecycle, and reduction semantics. Runtime parsing rejects invalid values; TypeScript types alone are not a validation boundary. The browser probe uses fixed examples to demonstrate event-union consumption and does not create a session.
@@ -31,9 +31,13 @@ The [cross-workspace concurrency contract](tool-execution.md#cross-workspace-con
 
 The [agent-loop reference](agent-loop.md) owns request assembly, provider stream validation, live run ownership, approval advancement, and bounded progression. The service derives requests from committed history and awaits the required model/tool writes before dependent dispatch. Controlled providers exercise this interface without network model calls; vendor serialization, credentials, and product transport remain separate work.
 
+## HTTP boundary
+
+The [execution HTTP service](http-service.md) exposes command receipts, saved session/history reads, and canonical SSE events over an explicit loopback listener. It owns command and loop lifetimes independently of HTTP/SSE connections, with browser-origin checks and bounded stream delivery. Construction requires an open store and injected provider; it adds no provider selection, product browser controls, or automatic runtime startup.
+
 ## Verification boundary
 
-The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, approved file/shell execution, and the controlled-provider loop without a network model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
+The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, approved tools, the controlled-provider loop, and actual HTTP/SSE connections without a network model. A successful browser build proves that the shared contract can be bundled; it does not substitute for interactive browser tests or the product's end-to-end acceptance conditions.
 
 The separate [foundation acceptance driver and viewer](execution-foundation-acceptance.md) live in the server package as contributor verification tools. They produce a static, inspectable report from real effects and saved events using scripted model declarations. The read-only viewer has no execution endpoints and is not the product HTTP/SSE service; the report renderer is not the React Chat/Trace application.
 

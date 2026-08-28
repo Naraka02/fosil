@@ -4,7 +4,7 @@ A coding agent project developed by a single maintainer.
 
 Document type: reference.
 
-The current implementation provides a controlled-provider agent loop over durable events and approved file and shell tools, plus a browser contract probe. Real-provider integration and product Chat/Trace controls remain unfinished. See the [architecture reference](docs/architecture.md) for implemented boundaries.
+The current implementation provides a controlled-provider agent loop over durable events and approved file and shell tools, a local HTTP/SSE service, and a browser contract probe. Real-provider integration and product Chat/Trace controls remain unfinished. See the [architecture reference](docs/architecture.md) for implemented boundaries.
 
 ## Start here
 

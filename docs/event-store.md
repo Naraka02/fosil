@@ -6,13 +6,19 @@ This reference owns durable storage, command acceptance, and the worker boundary
 
 ## Store interface
 
-[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `readPage`, `getSession`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions without a background execution loop or provider/tool dispatch. The separate [tool service](tool-execution.md) owns file and shell effects. Open includes the [startup recovery barrier](recovery.md#startup-admission) and returns its report.
+[SqliteWorkerStore](../packages/server/src/store.ts) exposes asynchronous `open`, `execute`, `append`, `appendBatch`, `read`, `readPage`, `getSession`, `listSessions`, and `close` operations. The database connection and synchronous filesystem checks live in its Node worker. The worker processes messages sequentially across all sessions without a background execution loop or provider/tool dispatch. The separate [tool service](tool-execution.md) owns file and shell effects. Open includes the [startup recovery barrier](recovery.md#startup-admission) and returns its report.
 
 After successful open, the server-only `protectedFiles` getter returns a detached list of the canonical database path and SQLite sidecar paths. It performs no filesystem I/O and rejects access before open or after close. File tools use it to reject active storage targets before opening them; it is not a public payload or browser API.
 
 `execute` is the command acceptance boundary. `append` and `appendBatch` are trusted internal interfaces for producers and fixtures: they enforce event shape and lifecycle, but do not manufacture command receipts, authorize filesystem access, or verify that reported effects occurred. They must not be exposed directly as browser mutation endpoints. In particular, a raw `session.created` append checks workspace syntax only; session creation through `execute` checks and pins the actual directory.
 
-`read(sessionId)` returns the complete hydrated, validated event history in sequence order. `getSession(sessionId)` returns the workspace, latest sequence, active run identity, and activity projection, or `null` for an unknown session. An unknown session has empty history. Both operations read a consistent transaction snapshot and check the stored session index against replay. They never dispatch work. Listing sessions, SSE, and a separate payload-fetch endpoint are not implemented.
+`read(sessionId)` returns the complete hydrated, validated event history in sequence order. `getSession(sessionId)` returns the workspace, latest sequence, active run identity, and activity projection, or `null` for an unknown session. An unknown session has empty history. Both operations read a consistent transaction snapshot and check the stored session index against replay. They never dispatch work. The [HTTP service](http-service.md) owns SSE and public reads; a separate payload-fetch endpoint is not implemented.
+
+## Session discovery
+
+`listSessions({ after?, limit? })` returns saved session summaries in SQLite's lexical session-identity order, strictly after the optional identity. Its default page contains at most 100 sessions and its maximum is 200. `next_after` is the last returned identity when another row exists, or `null` at the current end. Empty stores return an empty list. Each page checks returned summaries against replay inside one read transaction; listing never appends events or resumes work.
+
+Session listing does not pin a multi-page snapshot or sort by activity. New sessions may appear before a previously consumed position, so a complete refresh starts without `after`. The shared contracts own its request and response schemas. Its limit bounds session count, not replay cost or response bytes, and it does not change the database format.
 
 ## Fixed-prefix history paging
 
