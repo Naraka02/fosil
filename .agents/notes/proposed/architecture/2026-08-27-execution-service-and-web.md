@@ -8,7 +8,7 @@ The [implemented Execution Foundation](../../implemented/architecture/2026-08-27
 
 ## Proposal
 
-This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop, local HTTP/SSE transport, Chat and Trace controls, DeepSeek adapter, context compaction, product launcher, and release data-policy mechanisms are implemented through slice 10. Live-provider and complete release acceptance remain unfinished, so the enclosing note remains proposed. Its filename retains the original proposal date; the split does not approve new scope, change technology choices, or restart completed Foundation work. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements. Foundation closeout does not implement this proposal.
+This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop, local HTTP/SSE transport, Chat and Trace controls, DeepSeek adapter, context compaction, product launcher, release data-policy mechanisms, and live-provider integration are implemented through slice 10. Complete release acceptance remains unfinished, so the enclosing note remains proposed. Its filename retains the original proposal date; the split does not approve new scope, change technology choices, or restart completed Foundation work. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements. Foundation closeout does not implement this proposal.
 
 ### Composition and technology
 
@@ -16,7 +16,7 @@ Extend the existing local backend host with an execution service and product HTT
 
 | Area | Proposed integration | Reason and remaining cost |
 | --- | --- | --- |
-| Execution service | TypeScript/Node on the Foundation runtime, with explicit run ownership and a provider adapter | Reuses the selected language and durable contracts; DeepSeek Responses translation is implemented while live-provider acceptance remains open |
+| Execution service | TypeScript/Node on the Foundation runtime, with explicit run ownership and a provider adapter | Reuses the selected language and durable contracts; DeepSeek Responses translation and live-provider integration are verified |
 | HTTP | Fastify 5 with shared Zod 4 boundary validation | Keeps the framework outside the loop and avoids a second handwritten command schema; the existing acceptance viewer is not this service |
 | Browser | React, TypeScript, and Vite | Implements Chat now and later Trace without the upstream plugin platform or SSR |
 | Transport | JSON HTTP commands and reads; one SSE connection for the selected session | Commands do not need duplex transport; reconnect and slow-client handling remain application responsibilities |
@@ -126,11 +126,11 @@ The [loop limits](../../../../docs/agent-loop.md#limits) own step and provider-d
 
 ### Confirmation and remaining decisions
 
-The Foundation choices and bounded concurrency evidence are effective and owned by the [implemented note](../../implemented/architecture/2026-08-27-execution-foundations.md). The maintainer confirmed the DeepSeek model routing, Responses transport, context and compaction limits, single context-recovery attempt, configured-secret masking, sanitized provider evidence, and retained-payload budgets described above. Those mechanisms are implemented and have controlled verification; live provider use is not yet accepted. Shell-wide attribution, post-crash cleanup, blocker resolution, and complete release acceptance remain unfinished; credentials stay out of repository documents and conversation output.
+The Foundation choices and bounded concurrency evidence are effective and owned by the [implemented note](../../implemented/architecture/2026-08-27-execution-foundations.md). The maintainer confirmed the DeepSeek model routing, Responses transport, context and compaction limits, single context-recovery attempt, configured-secret masking, sanitized provider evidence, and retained-payload budgets described above. Those mechanisms have controlled verification, and live provider use is accepted for both configured models plus a Flash coding repair through the product service. Shell-wide attribution, post-crash cleanup, blocker resolution, and complete release acceptance remain unfinished; credentials stay out of repository documents and conversation output.
 
 The controlled-provider Web implementation makes no multi-conversation concurrency acceptance claim. The [Foundation concurrency contract](../../../../docs/tool-execution.md#cross-workspace-concurrency) remains the lower-level boundary, with no automatic scheduler, same-workspace writer guarantee, or shared-host fault isolation.
 
-The [controlled-provider phase](#controlled-provider-loop-phase) records the approved slice-6 scope and deferrals. Its [verification](#controlled-provider-verification) satisfies the bounded loop checkpoint; the implemented Web and DeepSeek/data-policy mechanisms have separate evidence, while live-provider and release acceptance still require verification.
+The [controlled-provider phase](#controlled-provider-loop-phase) records the approved slice-6 scope and deferrals. Its [verification](#controlled-provider-verification) satisfies the bounded loop checkpoint; the implemented Web, DeepSeek/data-policy, and live-provider mechanisms have separate evidence, while complete release acceptance still requires verification.
 
 ## Alternatives considered
 
@@ -205,7 +205,9 @@ The Node.js 24 typecheck, production build, product help, standalone SQLite prob
 
 Injected DeepSeek tests verify stateless Responses serialization, replay of exposed reasoning and function correlation, credential-free body digests, strict semantic SSE ordering and terminal handling, normalized usage, bounded errors, and exact context-limit classification. Loop tests verify that provider metadata is computed from the same masked request that is persisted and dispatched, proactive checkpoint projection, current and blocked-run raw preservation, deterministic file-change facts, one distinct context-recovery attempt, and terminal settlement after normal session capacity is exhausted. Store and HTTP tests verify exact configured-value masking, shared content metadata, compaction prose masking, 240/256 MiB policy mechanics through configurable fixtures, canonical payload retention, identical 64 KiB history/SSE projections, and real nonreading-socket backpressure after projection.
 
-Package and documentation review found no new runtime dependency or database `user_version`; the version-1 payload reader remains compatible with earlier unwrapped payloads. Newly created database permissions, launcher argument rejection, key-only environment configuration, and no-credential `--help` behavior are covered by code or tests. Changed-document links and fragments, documentation form, English-only prose, tracked whitespace, and untracked files were reviewed. Live DeepSeek output, billing, provider availability, and the end-to-end real-model bug-fix scenario remain unverified, so this note remains proposed.
+Package and documentation review found no new runtime dependency or database `user_version`; the version-1 payload reader remains compatible with earlier unwrapped payloads. Newly created database permissions, launcher argument rejection, key-only environment configuration, and no-credential `--help` behavior are covered by code or tests. Changed-document links and fragments, documentation form, English-only prose, tracked whitespace, and untracked files were reviewed.
+
+Product-loop verification used Node.js 24.20.0, the official TLS endpoint, and environment-only credentials. Flash and Pro each completed a minimal streamed adapter request and a product-launcher `read_file` loop with matching model metadata, non-null usage, durable Responses metadata, exact final content, and no configured credential in the saved event projection. The Linux-path launcher run created its database with mode `0600`. A separate Flash coding run completed five successful model requests, two file reads, three allowed approvals, one managed edit, a baseline test exit of 1, a verification exit of 0, and an independently confirmed passing test. The live run generated 293 saved browser-projected events, which also exercised complete fixed-prefix pagination in the acceptance client. Live context-overflow and provider-failure paths, browser refresh and restart during a real-model run, pre-existing user-change preservation, and complete release acceptance remain unverified, so this note remains proposed.
 
 ### Implementation slices
 
@@ -217,9 +219,9 @@ The original slice numbers are retained for continuity; completed slices 1 throu
 | 7. HTTP and SSE | Foundation and 6 | Implemented and checked by the [HTTP/SSE verification](#http-and-sse-verification), with controlled providers and no product browser UI |
 | 8. Chat controls | 7 | Implemented and checked by the [Chat controls verification](#chat-controls-verification), including real-browser refresh, approval, effect, denial, cancellation, and narrow-viewport behavior |
 | 9. Trace inspector | 8 | Implemented and checked by the [Trace inspector verification](#trace-inspector-verification), including grouped correlation, measurements, payload flags, saved diff evidence, filtering, and identical reopened facts |
-| 10. DeepSeek adapter, context, and data policy | 6-9 plus provider selection | Adapter, launcher, compaction, masking, browser previews, and retained-payload budgets are implemented; live bug-fix and failure-path acceptance remains required |
+| 10. DeepSeek adapter, context, and data policy | 6-9 plus provider selection | Adapter, launcher, compaction, masking, browser previews, retained-payload budgets, both model routes, and a live Flash bug-fix are verified; live failure paths and complete release acceptance remain required |
 
-Review evidence at each slice before starting dependent behavior. The controlled-provider loop and injected DeepSeek streams are deterministic test boundaries, not final live-provider acceptance. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns commands that exist; billable live-provider and release workflow tests require explicit execution and retained evidence.
+Review evidence at each slice before starting dependent behavior. The controlled-provider loop and injected DeepSeek streams remain deterministic test boundaries separate from the recorded live-provider evidence. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns commands that exist; additional billable live-provider and release workflow tests require explicit execution and retained evidence.
 
 ## Risks
 

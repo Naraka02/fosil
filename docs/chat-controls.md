@@ -28,7 +28,7 @@ If a mutation has no trustworthy HTTP outcome, the browser reports that delivery
 
 Chat renders user and assistant text through React text nodes and renders tool arguments as formatted JSON. It loads no external visual resources. The interface uses one selected session and one SSE connection; the sidebar list is lexical saved-session discovery rather than recency ordering or user-authored titles.
 
-Chat does not expose complete model request context, reasoning, tool results, diffs, timings, token usage, or retained-payload flags; the separate [Trace view](trace-inspector.md) presents those browser-projected facts where implemented. Recovery blocker resolution, session deletion, export, live-provider acceptance, and hostile local-process isolation remain unfinished. Configured-secret masking and retained-payload budgets apply in the service, not as Chat-side heuristics.
+Chat does not expose complete model request context, reasoning, tool results, diffs, timings, token usage, or retained-payload flags; the separate [Trace view](trace-inspector.md) presents those browser-projected facts where implemented. Recovery blocker resolution, session deletion, export, complete release acceptance, and hostile local-process isolation remain unfinished. Configured-secret masking and retained-payload budgets apply in the service, not as Chat-side heuristics.
 
 ## Verification
 
