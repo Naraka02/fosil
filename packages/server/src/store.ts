@@ -1,6 +1,7 @@
 import { Worker } from "node:worker_threads";
-import { commandAckSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
+import { commandAckSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, parseCommand, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
 import { isWorkerResponse, StoreError, type RecoveryReport, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
+import { ConfiguredSecretMasker, maskEventInput } from "./content-policy.js";
 
 export type StoreEvent = Event;
 export { StoreError } from "./storage-protocol.js";
@@ -10,11 +11,16 @@ export interface StoreOptions {
   maxPending?: number;
   maxRequestBytes?: number;
   maxPendingBytes?: number;
+  maskSecrets?: readonly string[];
+  normalSessionPayloadBytes?: number;
+  hardSessionPayloadBytes?: number;
 }
 
 export class SqliteWorkerStore {
   private readonly worker: Worker;
-  private readonly limits: Required<StoreOptions>;
+  private readonly limits: Required<Pick<StoreOptions, "maxPending" | "maxRequestBytes" | "maxPendingBytes">>;
+  private readonly retention: { normalSessionPayloadBytes: number; hardSessionPayloadBytes: number };
+  private readonly masker: ConfiguredSecretMasker;
   private nextId = 1;
   private closed = false;
   private closing: Promise<void> | undefined;
@@ -23,9 +29,17 @@ export class SqliteWorkerStore {
   private readonly pending = new Map<number, { bytes: number; resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 
   constructor(workerUrl: URL = new URL("./storage-worker.js", import.meta.url), options: StoreOptions = {}) {
-    this.limits = { maxPending: 64, maxRequestBytes: 8 * 1024 * 1024, maxPendingBytes: 16 * 1024 * 1024, ...options };
+    const { maskSecrets = [], normalSessionPayloadBytes = 240 * 1024 * 1024,
+      hardSessionPayloadBytes = 256 * 1024 * 1024, ...configuredLimits } = options;
+    this.limits = { maxPending: 64, maxRequestBytes: 8 * 1024 * 1024, maxPendingBytes: 16 * 1024 * 1024, ...configuredLimits };
+    this.retention = { normalSessionPayloadBytes, hardSessionPayloadBytes };
+    this.masker = new ConfiguredSecretMasker(maskSecrets);
     for (const limit of Object.values(this.limits)) {
       if (!Number.isSafeInteger(limit) || limit <= 0) throw new StoreError("invalid_options", "Store limits must be positive safe integers");
+    }
+    if (!Number.isSafeInteger(normalSessionPayloadBytes) || normalSessionPayloadBytes < 1
+      || !Number.isSafeInteger(hardSessionPayloadBytes) || hardSessionPayloadBytes <= normalSessionPayloadBytes) {
+      throw new StoreError("invalid_options", "Session payload budgets must be positive safe integers with a larger hard reserve");
     }
     this.worker = new Worker(workerUrl);
     this.worker.on("message", (message: unknown) => {
@@ -52,7 +66,7 @@ export class SqliteWorkerStore {
   }
 
   async open(path: string): Promise<RecoveryReport> {
-    const result = await this.call({ type: "open", path }) as { recovery: RecoveryReport; protectedFiles: string[] };
+    const result = await this.call({ type: "open", path, retention: this.retention }) as { recovery: RecoveryReport; protectedFiles: string[] };
     this.storagePaths = result.protectedFiles;
     return result.recovery;
   }
@@ -64,22 +78,34 @@ export class SqliteWorkerStore {
 
   async append(event: EventInput): Promise<Event> { return (await this.appendBatch([event]))[0]!; }
 
+  /** Returns the exact content-policy projection that append will validate and persist. */
+  sanitizeEventInput(event: EventInput): EventInput { return maskEventInput(event, this.masker); }
+
   async appendBatch(events: readonly EventInput[]): Promise<Event[]> {
-    const result = await this.call({ type: "append_batch", events });
+    const sanitized = events.map((event) => this.sanitizeEventInput(event));
+    const result = await this.call({ type: "append_batch", events: sanitized });
     return (result as unknown[]).map(parseEvent);
   }
 
   /** Preflight an append envelope, reserving the largest safe request-id width without dispatch. */
   checkAppendSize(events: readonly EventInput[], maxBytes: number): void {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new StoreError("invalid_options", "Append byte limit must be a positive safe integer");
-    const bytes = Buffer.byteLength(JSON.stringify({ type: "append_batch", events, id: Number.MAX_SAFE_INTEGER }));
+    const sanitized = events.map((event) => this.sanitizeEventInput(event));
+    const bytes = Buffer.byteLength(JSON.stringify({ type: "append_batch", events: sanitized, id: Number.MAX_SAFE_INTEGER }));
     if (bytes > Math.min(maxBytes, this.limits.maxRequestBytes)) {
       throw new StoreError("request_too_large", "Complete append request exceeds its byte limit");
     }
   }
 
   async execute(command: Command): Promise<CommandAck> {
-    return commandAckSchema.parse(await this.call({ type: "command", command }));
+    const parsed = parseCommand(command);
+    if (parsed.type !== "run.submit" || !this.masker.active) {
+      return commandAckSchema.parse(await this.call({ type: "command", command: parsed }));
+    }
+    const masked = this.masker.maskString(parsed.content, "/data/content");
+    return commandAckSchema.parse(await this.call({
+      type: "command", command: { ...parsed, content: masked.value }, contentMetadata: masked.metadata
+    }));
   }
 
   async read(sessionId: string): Promise<Event[]> {

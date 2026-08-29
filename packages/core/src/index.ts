@@ -68,6 +68,18 @@ export interface StepState {
   readonly callIds: readonly string[];
 }
 
+export interface CompactionState {
+  readonly compactionId: string;
+  readonly runId: string;
+  readonly status: "running" | "succeeded" | "failed";
+  readonly trigger: Data<"context.compaction.started">["trigger"];
+  readonly source: Data<"context.compaction.started">["source"];
+  readonly request: Data<"context.compaction.started">["request"];
+  readonly startedSeq: number;
+  readonly finishedSeq: number | null;
+  readonly result: Data<"context.compaction.succeeded"> | Data<"context.compaction.failed"> | null;
+}
+
 export interface RunState {
   readonly runId: string;
   readonly commandId: string;
@@ -79,6 +91,8 @@ export interface RunState {
   readonly activeStep: number | null;
   readonly activeRequestId: string | null;
   readonly activeToolId: string | null;
+  readonly activeCompactionId: string | null;
+  readonly compactionIds: readonly string[];
   readonly steps: ReadonlyMap<number, StepState>;
   readonly requests: ReadonlyMap<string, RequestState>;
   readonly tools: ReadonlyMap<string, ToolState>;
@@ -92,6 +106,7 @@ export interface ExecutionState {
   readonly activity: Activity;
   readonly activeRunId: string | null;
   readonly runs: ReadonlyMap<string, RunState>;
+  readonly compactions: ReadonlyMap<string, CompactionState>;
 }
 
 export class EventReducerError extends Error {
@@ -102,7 +117,7 @@ export class EventReducerError extends Error {
 }
 
 export function initialState(sessionId: string | null = null): ExecutionState {
-  return { sessionId, workspaceRoot: null, lastSeq: 0, activity: "idle", activeRunId: null, runs: new Map() };
+  return { sessionId, workspaceRoot: null, lastSeq: 0, activity: "idle", activeRunId: null, runs: new Map(), compactions: new Map() };
 }
 
 function requireFact(condition: unknown, code: string, message: string): asserts condition {
@@ -219,7 +234,8 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     return replaceRun(previous, {
       runId: event.data.run_id, commandId: event.data.command_id, status: "running", reason: null,
       blockedReason: null, cancelRequested: false, userMessage: null, activeStep: null,
-      activeRequestId: null, activeToolId: null, steps: new Map(), requests: new Map(), tools: new Map(), approvals: new Map()
+      activeRequestId: null, activeToolId: null, activeCompactionId: null, compactionIds: [],
+      steps: new Map(), requests: new Map(), tools: new Map(), approvals: new Map()
     });
   }
 
@@ -245,7 +261,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       requireFact(event.data.step === run.steps.size + 1, "order-gap", "step numbers must be contiguous");
       if (run.steps.size > 0) {
         const prior = run.steps.get(run.steps.size)!;
-        const request = run.requests.get(prior.requestIds[0]!);
+        const request = run.requests.get(prior.requestIds.at(-1)!);
         requireFact(prior.status === "completed" && request?.output && request.output.tool_calls.length > 0,
           "illegal-transition", "a terminal answer or failed step cannot start another model step");
       }
@@ -255,11 +271,17 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     case "model.request.started": {
       dispatchable(run);
       const step = run.steps.get(event.data.step);
-      requireFact(step?.status === "running" && run.activeStep === event.data.step && step.requestIds.length === 0
-        && run.activeRequestId === null && run.activeToolId === null && !pendingApproval(run),
-      "busy-request", "each step owns exactly one model request before its tools");
-      requireFact(event.data.attempt === 1 && !run.requests.has(event.data.request_id),
-        "duplicate-request", "only one attempt and a new request identity are supported");
+      requireFact(step?.status === "running" && run.activeStep === event.data.step && step.requestIds.length <= 1
+        && run.activeRequestId === null && run.activeToolId === null && run.activeCompactionId === null && !pendingApproval(run),
+      "busy-request", "a step supports one request plus one recorded context recovery attempt");
+      const priorRequest = step.requestIds.length === 0 ? undefined : run.requests.get(step.requestIds[0]!);
+      const recoveryCompaction = run.compactionIds.length === 0 ? undefined : previous.compactions.get(run.compactionIds.at(-1)!);
+      const validAttempt = event.data.attempt === 1 && priorRequest === undefined
+        || event.data.attempt === 2 && priorRequest?.status === "failed" && priorRequest.reason === "context_limit"
+          && recoveryCompaction?.status === "succeeded" && recoveryCompaction.trigger === "context_overflow"
+          && recoveryCompaction.finishedSeq !== null;
+      requireFact(validAttempt && !run.requests.has(event.data.request_id),
+        "duplicate-request", "request attempt is not the initial call or the single allowed context recovery");
       const request: RequestState = {
         requestId: event.data.request_id, step: event.data.step, attempt: event.data.attempt,
         status: "running", reason: null, context: event.data.request, deltaCount: 0,
@@ -267,7 +289,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       };
       return replaceRun(previous, {
         ...run, activeRequestId: request.requestId, requests: put(run.requests, request.requestId, request),
-        steps: put(run.steps, step.step, { ...step, requestIds: [request.requestId] })
+        steps: put(run.steps, step.step, { ...step, requestIds: [...step.requestIds, request.requestId] })
       });
     }
     case "model.response.delta": {
@@ -295,12 +317,59 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       }
       return replaceRun(previous, {
         ...run, activeRequestId: null,
-        blockedReason: event.data.status === "succeeded" ? run.blockedReason : run.blockedReason ?? event.data.reason,
+        blockedReason: event.data.status === "succeeded" || (event.data.reason === "context_limit" && request.attempt === 1)
+          ? run.blockedReason : run.blockedReason ?? event.data.reason,
         requests: put(run.requests, request.requestId, {
           ...request, status: event.data.status, reason: event.data.reason, output: event.data.output,
           usage: event.data.usage, timings: event.data.timings, stopReason: event.data.stop_reason, error: event.data.error
         })
       });
+    }
+    case "context.compaction.started": {
+      const step = run.activeStep === null ? undefined : run.steps.get(run.activeStep);
+      const priorRequest = step?.requestIds.length ? run.requests.get(step.requestIds.at(-1)!) : undefined;
+      requireFact(run.activeCompactionId === null && !previous.compactions.has(event.data.compaction_id)
+        && run.activeRequestId === null && run.activeToolId === null && !pendingApproval(run),
+      "busy-compaction", "compaction requires no other open provider, tool, or approval operation");
+      requireFact(event.data.source.through_seq < event.seq && event.data.source.event_count <= event.data.source.through_seq,
+        "invalid-compaction", "compaction source must identify an earlier durable prefix");
+      if (event.data.trigger === "context_overflow") {
+        requireFact(step?.status === "running" && priorRequest?.status === "failed" && priorRequest.reason === "context_limit"
+          && priorRequest.attempt === 1 && run.blockedReason === null,
+        "invalid-compaction", "overflow compaction requires the first recoverable context failure");
+      } else {
+        dispatchable(run);
+        requireFact(run.activeStep === null, "busy-compaction", "proactive compaction runs between model steps");
+      }
+      const compaction: CompactionState = {
+        compactionId: event.data.compaction_id, runId: run.runId, status: "running", trigger: event.data.trigger,
+        source: event.data.source, request: event.data.request, startedSeq: event.seq, finishedSeq: null, result: null
+      };
+      const next = replaceRun(previous, { ...run, activeCompactionId: compaction.compactionId,
+        compactionIds: [...run.compactionIds, compaction.compactionId] });
+      return { ...next, compactions: put(previous.compactions, compaction.compactionId, compaction) };
+    }
+    case "context.compaction.succeeded":
+    case "context.compaction.failed": {
+      const compaction = previous.compactions.get(event.data.compaction_id);
+      requireFact(compaction?.status === "running" && run.activeCompactionId === compaction.compactionId
+        && compaction.runId === run.runId && compaction.trigger === event.data.trigger
+        && same(compaction.source as unknown as JsonValue, event.data.source as unknown as JsonValue),
+      "wrong-correlation", "compaction settlement does not match its active source");
+      const succeeded = event.type === "context.compaction.succeeded";
+      if (succeeded) {
+        const shadowedRequests = new Set(event.data.shadowed_request_ids);
+        requireFact(event.data.shadowed_run_ids.every((id) => previous.runs.has(id))
+          && event.data.shadowed_request_ids.every((id) => [...previous.runs.values()].some((candidate) => candidate.requests.has(id)))
+          && ![...run.requests.values()].some((request) => request.status === "running" && shadowedRequests.has(request.requestId)),
+        "invalid-compaction", "compaction cannot shadow unknown or open execution identities");
+      }
+      const update: CompactionState = { ...compaction, status: succeeded ? "succeeded" : "failed",
+        finishedSeq: event.seq, result: event.data };
+      const nextRun = { ...run, activeCompactionId: null,
+        blockedReason: !succeeded && event.data.trigger === "context_overflow" ? "context_limit" : run.blockedReason };
+      const next = replaceRun(previous, nextRun);
+      return { ...next, compactions: put(previous.compactions, compaction.compactionId, update) };
     }
     case "tool.call.created": {
       dispatchable(run);
@@ -398,7 +467,8 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         const denied = event.data.status === "denied" && (approval?.status === "denied" || approval?.status === "expired")
           && event.data.reason === approval.status;
         const validationFailed = event.data.status === "failed" && event.data.reason === "validation_failed";
-        requireFact(denied || validationFailed || event.data.status === "cancelled" || event.data.status === "interrupted",
+        const capacityFailed = event.data.status === "failed" && event.data.reason === "limit_exceeded" && event.data.origin === "system";
+        requireFact(denied || validationFailed || capacityFailed || event.data.status === "cancelled" || event.data.status === "interrupted",
           "invalid-outcome", "tool outcome requires dispatch or a recorded pre-dispatch settlement");
       }
       return replaceRun(previous, {
@@ -420,7 +490,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       requireFact(event.data.status !== "cancelled" || run.blockedReason !== "cleanup_failed",
         "invalid-outcome", "cleanup failure cannot be reported as successful cancellation");
       if (event.data.status === "completed") {
-        const request = run.requests.get(step.requestIds[0]!);
+        const request = run.requests.get(step.requestIds.at(-1)!);
         requireFact(!run.cancelRequested && run.blockedReason === null && request?.status === "succeeded" && request.output
           && step.callIds.length === request.output.tool_calls.length,
         "unsettled-step", "a completed step requires its successful request and every requested tool call");
@@ -433,6 +503,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     }
     case "run.finished": {
       requireFact(run.activeStep === null && run.activeRequestId === null && run.activeToolId === null
+        && run.activeCompactionId === null
         && [...run.steps.values()].every((step) => step.status !== "running")
         && [...run.requests.values()].every((request) => request.status !== "running")
         && [...run.tools.values()].every(terminalTool) && !pendingApproval(run),
@@ -442,7 +513,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         "invalid-outcome", "cleanup failure requires a failed or interrupted run outcome");
       if (event.data.status === "completed") {
         const lastStep = run.steps.get(run.steps.size);
-        const lastRequest = lastStep && run.requests.get(lastStep.requestIds[0]!);
+        const lastRequest = lastStep && run.requests.get(lastStep.requestIds.at(-1)!);
         requireFact(run.userMessage !== null && !run.cancelRequested && run.blockedReason === null
           && lastStep?.status === "completed" && lastRequest?.status === "succeeded"
           && lastRequest.output?.tool_calls.length === 0,
@@ -461,5 +532,5 @@ export { planRecovery, workspaceBlockers } from "./recovery.js";
 export type { WorkspaceBlocker } from "./recovery.js";
 export { buildModelHistory } from "./history.js";
 export type { ModelHistoryMessage } from "./history.js";
-export { buildModelRequest } from "./model-context.js";
+export { buildModelRequest, modelMessages } from "./model-context.js";
 export type { ModelRequestOptions } from "./model-context.js";

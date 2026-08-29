@@ -34,6 +34,16 @@ export function planRecovery(initial: ExecutionState, recordedAt: string): Event
     state = applyEvent(state, { ...input, seq: state.lastSeq + 1 });
     inputs.push(input);
   };
+  if (run.activeCompactionId !== null) {
+    const compaction = state.compactions.get(run.activeCompactionId)!;
+    add("context.compaction.failed", {
+      run_id: run.runId, compaction_id: compaction.compactionId, trigger: compaction.trigger, source: compaction.source,
+      error: { code: "interrupted", message: "Context compaction was interrupted before a durable result", details: null },
+      usage: { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null,
+        cache_write_tokens: null, reasoning_tokens: null },
+      timings: { first_content_ms: null, duration_ms: null }, provider_response: null, origin: "recovery"
+    });
+  }
   for (const request of run.requests.values()) {
     if (request.status !== "running") continue;
     add("model.request.finished", {

@@ -35,7 +35,7 @@ export type ApprovalStatus = z.infer<typeof approvalStatusSchema>;
 export const reasonSchema = z.enum([
   "completed", "model_failed", "tool_failed", "validation_failed", "limit_exceeded",
   "cancel_requested", "cleanup_failed", "denied", "expired", "interrupted",
-  "cancelled", "timeout", "provider_error", "runner_error", "unknown"
+  "cancelled", "timeout", "provider_error", "context_limit", "runner_error", "unknown"
 ]);
 export type EventReason = z.infer<typeof reasonSchema>;
 
@@ -66,7 +66,8 @@ export const modelRequestContextSchema = z.object({
   settings: z.object({
     temperature: z.number().nullable(),
     top_p: z.number().nullable(),
-    max_output_tokens: positiveInt.nullable()
+    max_output_tokens: positiveInt.nullable(),
+    reasoning_effort: z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]).nullable().optional()
   }).strict()
 }).strict();
 
@@ -75,7 +76,8 @@ export const usageSchema = z.object({
   output_tokens: nonnegativeInt.nullable(),
   total_tokens: nonnegativeInt.nullable(),
   cache_read_tokens: nonnegativeInt.nullable(),
-  cache_write_tokens: nonnegativeInt.nullable()
+  cache_write_tokens: nonnegativeInt.nullable(),
+  reasoning_tokens: nonnegativeInt.nullable().optional()
 }).strict();
 
 export const timingSchema = z.object({
@@ -99,6 +101,43 @@ const errorSchema = z.object({
   details: jsonValueSchema.nullable()
 }).strict();
 
+const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
+export const contentMetadataSchema = z.object({
+  path: z.string().startsWith("/data/"),
+  masked: z.boolean(),
+  mask_count: nonnegativeInt,
+  truncated: z.boolean(),
+  omitted: z.boolean(),
+  original_bytes: nonnegativeInt,
+  retained_bytes: nonnegativeInt,
+  sha256
+}).strict().refine((value) => value.masked === (value.mask_count > 0), "mask count must agree with masked state");
+
+export const providerRequestMetadataSchema = z.object({
+  protocol: z.literal("responses"),
+  adapter: id,
+  endpoint: z.url(),
+  body_sha256: sha256
+}).strict();
+
+export const providerResponseMetadataSchema = z.object({
+  response_id: id,
+  status: z.enum(["completed", "incomplete", "failed"]),
+  model: id
+}).strict();
+
+export const contextMeasurementSchema = z.object({
+  estimated_input_tokens: nonnegativeInt,
+  serialized_bytes: nonnegativeInt,
+  hard_input_tokens: positiveInt
+}).strict();
+
+export const contextFactSchema = z.object({
+  kind: z.enum(["objective", "constraint", "file_change", "tool_outcome", "test_result", "blocker", "next_action"]),
+  text: z.string(),
+  source_ids: z.array(id)
+}).strict();
+
 export const evidenceSchema = z.object({
   kind: z.enum(["none", "file_change", "command", "process", "unknown"]),
   data: jsonValueSchema.nullable()
@@ -108,7 +147,7 @@ const eventBase = {
   schema_version: z.literal(1), session_id: id, seq: positiveInt, recorded_at: isoTimestamp
 } as const;
 const envelope = <K extends string, T extends z.ZodType>(type: K, data: T) => z.object({
-  ...eventBase, type: z.literal(type), data
+  ...eventBase, type: z.literal(type), data, content_metadata: z.array(contentMetadataSchema).optional()
 }).strict();
 
 export const sessionCreatedEventSchema = envelope("session.created", z.object({
@@ -130,7 +169,8 @@ export const stepFinishedEventSchema = envelope("step.finished", z.object({
 }).strict());
 
 export const modelRequestStartedEventSchema = envelope("model.request.started", z.object({
-  ...correlation, request: modelRequestContextSchema, origin: z.literal("runner")
+  ...correlation, request: modelRequestContextSchema,
+  provider_request: providerRequestMetadataSchema.nullable().optional(), origin: z.literal("runner")
 }).strict());
 export const modelResponseDeltaEventSchema = envelope("model.response.delta", z.object({
   ...correlation,
@@ -151,6 +191,48 @@ export const modelRequestFinishedEventSchema = envelope("model.request.finished"
   usage: usageSchema,
   timings: timingSchema,
   error: errorSchema.nullable(),
+  provider_response: providerResponseMetadataSchema.nullable().optional(),
+  origin: z.enum(["provider", "runner", "recovery"])
+}).strict());
+
+const compactionBase = {
+  ...runCorrelation,
+  compaction_id: id,
+  trigger: z.enum(["token_pressure", "request_bytes", "context_overflow"]),
+  source: z.object({ through_seq: positiveInt, event_count: positiveInt, sha256 }).strict()
+} as const;
+
+export const contextCompactionStartedEventSchema = envelope("context.compaction.started", z.object({
+  ...compactionBase,
+  request: modelRequestContextSchema,
+  provider_request: providerRequestMetadataSchema.nullable().optional(),
+  before: contextMeasurementSchema,
+  target_input_tokens: positiveInt,
+  origin: z.literal("runner")
+}).strict());
+
+export const contextCompactionSucceededEventSchema = envelope("context.compaction.succeeded", z.object({
+  ...compactionBase,
+  summary: z.string(),
+  reasoning: z.string().nullable(),
+  stop_reason: z.string().nullable(),
+  facts: z.array(contextFactSchema),
+  shadowed_run_ids: z.array(id),
+  shadowed_request_ids: z.array(id),
+  retained_tail_tokens: nonnegativeInt,
+  after: contextMeasurementSchema,
+  usage: usageSchema,
+  timings: timingSchema,
+  provider_response: providerResponseMetadataSchema.nullable().optional(),
+  origin: z.literal("provider")
+}).strict());
+
+export const contextCompactionFailedEventSchema = envelope("context.compaction.failed", z.object({
+  ...compactionBase,
+  error: errorSchema,
+  usage: usageSchema,
+  timings: timingSchema,
+  provider_response: providerResponseMetadataSchema.nullable().optional(),
   origin: z.enum(["provider", "runner", "recovery"])
 }).strict());
 
@@ -192,7 +274,9 @@ export const runFinishedEventSchema = envelope("run.finished", z.object({
 export const eventSchema = z.discriminatedUnion("type", [
   sessionCreatedEventSchema, runStartedEventSchema, userMessageEventSchema,
   stepStartedEventSchema, stepFinishedEventSchema, modelRequestStartedEventSchema,
-  modelResponseDeltaEventSchema, modelRequestFinishedEventSchema, toolCallCreatedEventSchema,
+  modelResponseDeltaEventSchema, modelRequestFinishedEventSchema,
+  contextCompactionStartedEventSchema, contextCompactionSucceededEventSchema, contextCompactionFailedEventSchema,
+  toolCallCreatedEventSchema,
   approvalRequestedEventSchema, approvalResolvedEventSchema, toolStartedEventSchema,
   toolFinishedEventSchema, runCancelRequestedEventSchema, runFinishedEventSchema
 ]);
@@ -200,7 +284,9 @@ export const eventInputSchema = z.discriminatedUnion("type", [
   sessionCreatedEventInputSchema, runStartedEventSchema.omit({ seq: true }), userMessageEventSchema.omit({ seq: true }),
   stepStartedEventSchema.omit({ seq: true }), stepFinishedEventSchema.omit({ seq: true }),
   modelRequestStartedEventSchema.omit({ seq: true }), modelResponseDeltaEventSchema.omit({ seq: true }),
-  modelRequestFinishedEventSchema.omit({ seq: true }), toolCallCreatedEventSchema.omit({ seq: true }),
+  modelRequestFinishedEventSchema.omit({ seq: true }),
+  contextCompactionStartedEventSchema.omit({ seq: true }), contextCompactionSucceededEventSchema.omit({ seq: true }),
+  contextCompactionFailedEventSchema.omit({ seq: true }), toolCallCreatedEventSchema.omit({ seq: true }),
   approvalRequestedEventSchema.omit({ seq: true }), approvalResolvedEventSchema.omit({ seq: true }),
   toolStartedEventSchema.omit({ seq: true }), toolFinishedEventSchema.omit({ seq: true }),
   runCancelRequestedEventSchema.omit({ seq: true }), runFinishedEventSchema.omit({ seq: true })
@@ -217,6 +303,11 @@ export type ExecutionError = z.infer<typeof errorSchema>;
 export type Evidence = z.infer<typeof evidenceSchema>;
 export type Usage = z.infer<typeof usageSchema>;
 export type Timing = z.infer<typeof timingSchema>;
+export type ContentMetadata = z.infer<typeof contentMetadataSchema>;
+export type ProviderRequestMetadata = z.infer<typeof providerRequestMetadataSchema>;
+export type ProviderResponseMetadata = z.infer<typeof providerResponseMetadataSchema>;
+export type ContextMeasurement = z.infer<typeof contextMeasurementSchema>;
+export type ContextFact = z.infer<typeof contextFactSchema>;
 
 export function parseEvent(value: unknown): Event { return eventSchema.parse(value); }
 export function parseEventInput(value: unknown): EventInput { return eventInputSchema.parse(value); }

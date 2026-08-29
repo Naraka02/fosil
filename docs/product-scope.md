@@ -8,7 +8,7 @@ This document owns the approved first-release audience, workflow, exclusions, tr
 
 The first release serves one developer, initially the maintainer, who wants both coding assistance and direct inspection of the agent's execution. The user works through a browser on the same machine as the execution service and explicitly selects one trusted local repository for a session.
 
-The execution scope is a single agent, with no delegation or agent teams. One real model provider is sufficient for release acceptance; its identity is not yet selected. The product is local, with no remote-access or multi-user deployment requirement. Application approval controls do not imply an operating-system sandbox.
+The execution scope is a single agent, with no delegation or agent teams. Release acceptance uses DeepSeek's official Responses API with Flash by default and Pro as an explicit execution selection; the [provider reference](deepseek-provider.md) owns the effective integration. The product is local, with no remote-access or multi-user deployment requirement. Application approval controls do not imply an operating-system sandbox.
 
 ## Required workflow
 
@@ -22,7 +22,7 @@ Service restart must allow the user to inspect saved history and begin another t
 
 The first release excludes multi-user access, remote hosting, multi-agent execution, MCP, a plugin marketplace or general plugin platform, scheduled tasks, IDE integration, and cloud telemetry. A dedicated CLI/TUI product and wholesale migration of reference systems are not required.
 
-Skills, long-term memory, automatic context compaction, and multiple real model providers are deferred. Their presence in a reference implementation does not put them in scope. The initial implementation still needs explicit limits and failure behavior for a conversation that exceeds its supported context budget.
+Skills, long-term memory, and multiple real model providers are deferred. Automatic [context compaction](context-compaction.md) is part of the selected provider boundary so long conversations have explicit measurement, projection, and failure behavior. It does not add deletable history, long-term memory, or provider-side conversation state.
 
 ## Trace requirements
 
@@ -56,7 +56,7 @@ Trace stays on the local machine and is not uploaded by default. This local-stor
 
 Configured credentials and authentication headers must not enter trace records. Source files and tool output may contain other sensitive content; the scope does not promise recognition of every embedded secret. Any masking, omitted payload, or truncation must be marked explicitly so the user can distinguish retained evidence from an exact original request or result. Raw HTTP headers and transport packet capture are not required.
 
-Payload retention, size limits, and content masking policy require an explicit implementation decision. They must preserve the approved inspection behavior or clearly expose its limits. Required execution records cannot fail to save silently while the UI claims they are available for recovery.
+Payload retention, size limits, and content masking follow the [store policy](event-store.md#content-masking-and-retention) and [browser projection boundary](http-service.md#transport-limits). They must preserve the approved inspection behavior or expose each incomplete field explicitly. Required execution records cannot fail to save silently while the UI claims they are available for recovery.
 
 ## Acceptance conditions
 

@@ -1,10 +1,10 @@
-import type { Command, EventInput, HistoryPageRequest, SessionListRequest } from "@fosil/contracts";
+import type { Command, ContentMetadata, EventInput, HistoryPageRequest, SessionListRequest } from "@fosil/contracts";
 import type { WorkspaceBlocker } from "@fosil/core";
 
 export type WorkerCommand =
-  | { type: "open"; path: string }
+  | { type: "open"; path: string; retention: { normalSessionPayloadBytes: number; hardSessionPayloadBytes: number } }
   | { type: "append_batch"; events: readonly EventInput[] }
-  | { type: "command"; command: Command }
+  | { type: "command"; command: Command; contentMetadata?: readonly ContentMetadata[] }
   | { type: "read"; sessionId: string }
   | { type: "history_page"; request: HistoryPageRequest }
   | { type: "session"; sessionId: string }

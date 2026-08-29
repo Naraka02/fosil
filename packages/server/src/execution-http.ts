@@ -3,12 +3,13 @@ import { readFile } from "node:fs/promises";
 import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import {
-  commandSchema, historyPageRequestSchema, historyQuerySchema, sequenceTextSchema, sessionListQuerySchema,
+  commandSchema, historyPageRequestSchema, historyPageSchema, historyQuerySchema, sequenceTextSchema, sessionListQuerySchema,
   sessionParamsSchema, streamQuerySchema, type Command, type CommandAck
 } from "@fosil/contracts";
 import { AgentLoopService, type AgentLoopOptions } from "./agent-loop.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
 import { StreamStopped, streamPause, writeSseFrame } from "./sse.js";
+import { browserEventPreview } from "./browser-preview.js";
 
 export interface ExecutionHttpOptions {
   store: SqliteWorkerStore;
@@ -124,10 +125,11 @@ export class ExecutionHttpServer {
       if (query.cursor !== undefined) {
         try { cursor = JSON.parse(query.cursor); } catch { throw invalid(); }
       }
-      return this.store.readPage(parse(historyPageRequestSchema, {
+      const page = await this.store.readPage(parse(historyPageRequestSchema, {
         session_id: sessionId, ...(query.limit === undefined ? {} : { limit: Number(query.limit) }),
         ...(query.cursor === undefined ? {} : { cursor })
       }));
+      return historyPageSchema.parse({ ...page, events: page.events.map((event) => browserEventPreview(event)) });
     });
     this.app.get("/api/sessions/:sessionId/events", async (request, reply) => {
       if (this.phase !== "ready") throw unavailable();
@@ -225,6 +227,7 @@ export class ExecutionHttpServer {
       }
       if (["invalid_cursor", "invalid_workspace", "invalid_session", "validation_failed", "ENOENT", "ENOTDIR", "EACCES"].includes(code)) return new HttpError(400, code, "Invalid request or unavailable workspace");
       if (code === "request_too_large") return new HttpError(413, code, "Request exceeds its byte limit");
+      if (code === "session_capacity") return new HttpError(507, code, "Session retained-payload capacity reached");
       if (code === "queue_full") return new HttpError(503, code, "Storage capacity reached");
     }
     if (error instanceof Error && "code" in error && typeof error.code === "string" && error.code.startsWith("FST_ERR_")) {
@@ -257,7 +260,7 @@ export class ExecutionHttpServer {
           const page = await this.store.readPage({ session_id: sessionId, cursor: { session_id: sessionId, after, through }, limit: 1 });
           const event = page.events[0];
           if (!event || event.seq !== after + 1) throw new StoreError("corrupt_history", "Event stream sequence gap");
-          await send(`id: ${event.seq}\nevent: execution\ndata: ${JSON.stringify(event)}\n\n`);
+          await send(`id: ${event.seq}\nevent: execution\ndata: ${JSON.stringify(browserEventPreview(event))}\n\n`);
           after = event.seq;
           lastWrite = performance.now();
         }

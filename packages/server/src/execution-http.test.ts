@@ -90,6 +90,44 @@ async function stream(origin: string, sessionId: string, after = "0", headers: R
 }
 
 describe("execution HTTP commands and reads", () => {
+  it("projects bounded browser fields in history and SSE while retaining the full canonical event", async () => {
+    const f = await fixture();
+    const { session_id } = await f.create();
+    const content = "界".repeat(40_000);
+    const envelope = { schema_version: 1 as const, session_id, recorded_at: new Date().toISOString() };
+    await f.store.appendBatch([
+      { ...envelope, type: "run.started", data: { run_id: "preview-run", command_id: "preview-command", origin: "runner" } },
+      { ...envelope, type: "user.message", data: {
+        run_id: "preview-run", command_id: "preview-command", content, origin: "user"
+      } },
+      { ...envelope, type: "run.finished", data: {
+        run_id: "preview-run", status: "failed", reason: "runner_error", origin: "runner"
+      } }
+    ]);
+
+    const history = historyPageSchema.parse(await (await fetch(
+      f.origin + `/api/sessions/${session_id}/history?limit=10`
+    )).json());
+    const historyMessage = history.events.find((event) => event.type === "user.message");
+    expect(historyMessage?.type).toBe("user.message");
+    if (historyMessage?.type !== "user.message") throw new Error("missing history preview");
+    expect(Buffer.byteLength(historyMessage.data.content, "utf8")).toBeLessThanOrEqual(64 * 1024);
+    expect(historyMessage.content_metadata?.[0]).toMatchObject({ path: "/data/content", truncated: true,
+      original_bytes: Buffer.byteLength(content, "utf8") });
+
+    const live = await stream(f.origin, session_id);
+    await until(() => live.events.some((event) => event.type === "user.message"));
+    const streamMessage = live.events.find((event) => event.type === "user.message");
+    expect(streamMessage).toEqual(historyMessage);
+    live.close();
+
+    const canonical = (await f.store.read(session_id)).find((event) => event.type === "user.message");
+    expect(canonical?.type).toBe("user.message");
+    if (canonical?.type !== "user.message") throw new Error("missing canonical event");
+    expect(canonical.data.content).toBe(content);
+    expect(canonical.content_metadata).toBeUndefined();
+  });
+
   it("validates shared commands, lists saved sessions, and pages an immutable history prefix", async () => {
     const f = await fixture();
     const sessions = await Promise.all([f.create("a"), f.create("b"), f.create("c")]);
@@ -353,16 +391,30 @@ describe("durable event SSE", () => {
 
   it("disconnects a real nonreading socket under backpressure without fetching another event", async () => {
     const f = await fixture(undefined, { maxStreams: 1, drainTimeoutMs: 30 }); const { session_id } = await f.create();
-    await f.store.execute({ type: "run.submit", command_id: "large-fixture", session_id, content: "x".repeat(6 * 1024 * 1024) });
+    const events: EventInput[] = [];
+    for (let index = 0; index < 80; index++) {
+      const runId = `large-run-${index}`;
+      const envelope = { schema_version: 1 as const, session_id, recorded_at: new Date().toISOString() };
+      events.push(
+        { ...envelope, type: "run.started", data: { run_id: runId, command_id: `large-command-${index}`, origin: "runner" } },
+        { ...envelope, type: "user.message", data: { run_id: runId, command_id: `large-command-${index}`,
+          content: "x".repeat(96 * 1024), origin: "user" } },
+        { ...envelope, type: "run.finished", data: { run_id: runId, status: "failed", reason: "runner_error", origin: "runner" } }
+      );
+    }
+    await f.store.appendBatch(events);
     const address = new URL(f.origin);
     const socket: Socket = connect(Number(address.port), "127.0.0.1"); connections.push(socket); socket.on("error", () => {});
     await new Promise<void>((resolve) => socket.once("connect", resolve)); socket.pause();
     socket.write(`GET /api/sessions/${session_id}/events?after=1 HTTP/1.1\r\nHost: ${address.host}\r\n\r\n`);
     await until(() => f.store.pageReads >= 3);
     await new Promise((resolve) => setTimeout(resolve, 200));
-    expect(f.store.pageReads).toBe(3);
+    const stoppedAt = f.store.pageReads;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(f.store.pageReads).toBe(stoppedAt);
+    expect(stoppedAt).toBeLessThan((await f.store.getSession(session_id))!.last_seq);
     const next = await stream(f.origin, session_id, "3"); expect(next.response.statusCode).toBe(200); next.close(); socket.destroy();
-  }, 10_000);
+  }, 15_000);
 
   it("shuts down subscribers and provider ownership while leaving the caller store usable and recovery honest", async () => {
     let entered = false, cleaned = false;

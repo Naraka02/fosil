@@ -1,8 +1,9 @@
-import type { EventReason, ExecutionError, JsonValue, ModelOutput, RequestStatus, ToolStatus } from "@fosil/contracts";
+import type { ContextFact, EventReason, ExecutionError, JsonValue, ModelOutput, RequestStatus, ToolStatus } from "@fosil/contracts";
 import { EventReducerError, type ExecutionState } from "./index.js";
 
 type Correlation = { run_id: string; request_id: string };
 export type ModelHistoryMessage =
+  | { role: "system"; compaction_id: string; content: { kind: "context_checkpoint"; summary: string; facts: ContextFact[]; source: JsonValue } }
   | { role: "user"; run_id: string; content: string }
   | (Correlation & { role: "assistant"; status: RequestStatus; output: ModelOutput; provenance: "recorded" | "recovery" })
   | (Correlation & { role: "tool"; provider_call_id: string; name: string; content: {
@@ -14,9 +15,21 @@ export type ModelHistoryMessage =
 /** Provider-neutral history, not a wire request or a second durable event stream. */
 export function buildModelHistory(state: ExecutionState): ModelHistoryMessage[] {
   const messages: ModelHistoryMessage[] = [];
+  const checkpoint = [...state.compactions.values()]
+    .filter((candidate) => candidate.status === "succeeded" && candidate.result !== null)
+    .sort((left, right) => (left.finishedSeq ?? 0) - (right.finishedSeq ?? 0)).at(-1);
+  const result = checkpoint?.result?.origin === "provider" && "summary" in checkpoint.result ? checkpoint.result : null;
+  const shadowedRuns = new Set(result?.shadowed_run_ids ?? []);
+  const shadowedRequests = new Set(result?.shadowed_request_ids ?? []);
+  if (checkpoint && result) messages.push({
+    role: "system", compaction_id: checkpoint.compactionId,
+    content: { kind: "context_checkpoint", summary: result.summary, facts: result.facts,
+      source: { ...result.source, retained_tail_tokens: result.retained_tail_tokens } }
+  });
   for (const run of state.runs.values()) {
-    if (run.userMessage !== null) messages.push({ role: "user", run_id: run.runId, content: run.userMessage });
+    if (run.userMessage !== null && !shadowedRuns.has(run.runId)) messages.push({ role: "user", run_id: run.runId, content: run.userMessage });
     for (const request of run.requests.values()) {
+      if (shadowedRequests.has(request.requestId) || request.reason === "context_limit") continue;
       if (request.status === "running" || request.output === null) {
         throw new EventReducerError("history_incomplete", "Cannot build model history from an open request");
       }

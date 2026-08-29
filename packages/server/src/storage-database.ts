@@ -1,8 +1,8 @@
 import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
-import { realpathSync, statSync } from "node:fs";
+import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { commandAckSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
+import { commandAckSchema, contentMetadataSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type ContentMetadata, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
 import { applyEvent, planRecovery, replay, workspaceBlockers, type ExecutionState } from "@fosil/core";
 import { StoreError, type RecoveryReport, type SessionSummary } from "./storage-protocol.js";
 
@@ -26,6 +26,12 @@ const schema = `
   PRAGMA user_version = 1;
 `;
 
+const payloadMarker = "__fosil_event_payload_v1";
+const reserveEligible = new Set<Event["type"]>([
+  "run.cancel_requested", "approval.resolved", "model.request.finished", "context.compaction.succeeded", "context.compaction.failed",
+  "tool.finished", "step.finished", "run.finished"
+]);
+
 function canonicalDatabasePath(path: string): string {
   if (!isAbsolute(path) || path.startsWith("//") || /[\0\uD800-\uDFFF]/u.test(path)) throw new StoreError("invalid_path", "Database requires an absolute local Linux file path with well-formed Unicode and no NUL");
   try {
@@ -48,7 +54,15 @@ const eventColumns = "SELECT e.session_id, e.seq, e.schema_version, e.type, e.re
 function hydrate(rows: EventRow[]): Event[] {
   return rows.map(({ data_json, ...envelope }) => {
     if (data_json === null) throw new Error("Missing event payload");
-    return parseEvent({ ...envelope, data: JSON.parse(data_json) });
+    const payload = JSON.parse(data_json) as unknown;
+    if (payload && typeof payload === "object" && !Array.isArray(payload)
+      && (payload as Record<string, unknown>)[payloadMarker] === 1) {
+      const encoded = payload as Record<string, unknown>;
+      return parseEvent({ ...envelope, data: encoded.data,
+        ...(Array.isArray(encoded.content_metadata) && encoded.content_metadata.length
+          ? { content_metadata: encoded.content_metadata } : {}) });
+    }
+    return parseEvent({ ...envelope, data: payload });
   });
 }
 function overlaps(a: string, b: string): boolean {
@@ -58,15 +72,24 @@ function overlaps(a: string, b: string): boolean {
 /** This class is instantiated only inside the storage worker. */
 export class StorageDatabase {
   private recoveryReport: RecoveryReport = { recovered_sessions: [], blocked_workspaces: [] };
-  private constructor(private readonly db: Database.Database) {}
+  private constructor(private readonly db: Database.Database,
+    private readonly retention: { normalSessionPayloadBytes: number; hardSessionPayloadBytes: number }) {}
 
   get recovery(): RecoveryReport { return this.recoveryReport; }
 
   get protectedFiles(): string[] { return [this.db.name, `${this.db.name}-wal`, `${this.db.name}-shm`, `${this.db.name}-journal`]; }
 
-  static open(path: string): StorageDatabase {
-    const db = new Database(canonicalDatabasePath(path), { timeout: 0 });
+  static open(path: string, retention: { normalSessionPayloadBytes: number; hardSessionPayloadBytes: number }): StorageDatabase {
+    if (!retention || !Number.isSafeInteger(retention.normalSessionPayloadBytes) || retention.normalSessionPayloadBytes < 1
+      || !Number.isSafeInteger(retention.hardSessionPayloadBytes)
+      || retention.hardSessionPayloadBytes <= retention.normalSessionPayloadBytes) {
+      throw new StoreError("invalid_options", "Invalid session payload budgets");
+    }
+    const canonicalPath = canonicalDatabasePath(path);
+    const existed = existsSync(canonicalPath);
+    const db = new Database(canonicalPath, { timeout: 0 });
     try {
+      if (!existed) chmodSync(canonicalPath, 0o600);
       // Retain the database lock for this connection's lifetime, including between commits.
       db.pragma("locking_mode = EXCLUSIVE");
       db.exec("BEGIN EXCLUSIVE");
@@ -82,7 +105,7 @@ export class StorageDatabase {
       db.prepare("SELECT session_id, workspace_root, last_seq, active_run_id, activity FROM sessions LIMIT 0").all();
       db.prepare("SELECT e.schema_version, e.type, e.recorded_at, e.seq, e.session_id, p.data_json FROM events e LEFT JOIN payloads p USING(payload_id) LIMIT 0").all();
       db.prepare("SELECT scope_kind, scope_id, command_id, fingerprint, ack_json FROM command_receipts LIMIT 0").all();
-      const store = new StorageDatabase(db);
+      const store = new StorageDatabase(db, retention);
       store.recoveryReport = store.recoverOnOpen();
       return store;
     } catch (error) {
@@ -138,8 +161,10 @@ export class StorageDatabase {
     return this.db.transaction(() => this.appendWithinTransaction(inputs)).immediate();
   }
 
-  execute(rawCommand: unknown): CommandAck {
+  execute(rawCommand: unknown, rawContentMetadata?: readonly ContentMetadata[]): CommandAck {
     const command = parseCommand(rawCommand);
+    const contentMetadata = rawContentMetadata === undefined ? undefined : contentMetadataSchema.array().parse(rawContentMetadata);
+    if (contentMetadata !== undefined && command.type !== "run.submit") throw new StoreError("invalid_command", "Only submitted user content can carry command masking metadata");
     // Zod emits the schema's property order; generated IDs, time, and filesystem resolution are excluded.
     const fingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
     const scopeKind = command.type === "session.create" ? "store" : "session";
@@ -178,7 +203,8 @@ export class StorageDatabase {
           runId = randomUUID();
           inputs = [
             { ...envelope, type: "run.started", data: { run_id: runId, command_id: command.command_id, origin: "user" } },
-            { ...envelope, type: "user.message", data: { run_id: runId, command_id: command.command_id, content: command.content, origin: "user" } }
+            { ...envelope, type: "user.message", data: { run_id: runId, command_id: command.command_id, content: command.content, origin: "user" },
+              ...(contentMetadata?.length ? { content_metadata: contentMetadata } : {}) }
           ];
         } else {
           runId = command.run_id;
@@ -260,6 +286,7 @@ export class StorageDatabase {
 
   private appendWithinTransaction(inputs: readonly EventInput[]): Event[] {
     const states = new Map<string, ExecutionState>();
+    const payloadBytes = new Map<string, number>();
     const events: Event[] = [];
     for (const raw of inputs) {
       const input = parseEventInput(raw);
@@ -274,7 +301,18 @@ export class StorageDatabase {
         ON CONFLICT(session_id) DO UPDATE SET last_seq = excluded.last_seq, active_run_id = excluded.active_run_id, activity = excluded.activity`)
         .run(row.session_id, row.workspace_root, row.last_seq, row.active_run_id, row.activity);
       const payloadId = randomUUID();
-      this.db.prepare("INSERT INTO payloads (payload_id, data_json) VALUES (?, ?)").run(payloadId, JSON.stringify(event.data));
+      const encodedPayload = JSON.stringify({ [payloadMarker]: 1, data: event.data,
+        content_metadata: event.content_metadata ?? [] });
+      const currentBytes = payloadBytes.get(event.session_id) ?? (this.db.prepare(`SELECT COALESCE(SUM(length(CAST(p.data_json AS BLOB))), 0) AS bytes
+        FROM events e JOIN payloads p USING(payload_id) WHERE e.session_id = ?`).get(event.session_id) as { bytes: number }).bytes;
+      const nextBytes = currentBytes + Buffer.byteLength(encodedPayload, "utf8");
+      if (nextBytes > this.retention.hardSessionPayloadBytes
+        || (!reserveEligible.has(event.type) && nextBytes > this.retention.normalSessionPayloadBytes)) {
+        throw new StoreError("session_capacity", reserveEligible.has(event.type)
+          ? "Session terminal payload reserve is exhausted" : "Session normal payload budget is exhausted");
+      }
+      payloadBytes.set(event.session_id, nextBytes);
+      this.db.prepare("INSERT INTO payloads (payload_id, data_json) VALUES (?, ?)").run(payloadId, encodedPayload);
       this.db.prepare("INSERT INTO events (session_id, seq, schema_version, type, recorded_at, payload_id) VALUES (?, ?, ?, ?, ?, ?)")
         .run(event.session_id, event.seq, event.schema_version, event.type, event.recorded_at, payloadId);
       states.set(event.session_id, state);

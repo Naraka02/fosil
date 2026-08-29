@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import {
   modelRequestContextSchema, parseEventInput,
-  type EventInput, type EventReason, type ModelOutput, type ModelRequestContext
+  type Event, type EventInput, type EventReason, type ModelOutput, type ModelRequestContext
 } from "@fosil/contracts";
 import { buildModelRequest, replay, type ExecutionState, type RunState } from "@fosil/core";
 import { executeModelRequest, type ModelProvider, type ModelRequestOutcome } from "./model-provider.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
 import { ToolService } from "./tool-service.js";
+import {
+  buildCompactionPlan, compactionTrigger, measureContext, projectedRequestAfterCompaction,
+  type ContextWindowPolicy
+} from "./context-compaction.js";
 
 export interface AgentLoopOptions {
   provider: ModelProvider;
@@ -22,6 +26,7 @@ export interface AgentLoopOptions {
   batchBytes?: number;
   pollIntervalMs?: number;
   approvalTtlMs?: number;
+  contextPolicy?: ContextWindowPolicy | null;
   now?: () => Date;
 }
 
@@ -41,7 +46,7 @@ interface LiveRun {
 // A second service on the same store cannot drive an already-owned run again.
 const liveStores = new WeakMap<SqliteWorkerStore, Map<string, LiveRun>>();
 const terminal = (run: RunState) => ["completed", "failed", "cancelled", "interrupted"].includes(run.status);
-const unknownUsage = () => ({ input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null });
+const unknownUsage = () => ({ input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null, reasoning_tokens: null });
 
 /** Owns accepted runs without depending on a browser, request handler, or live subscriber. */
 export class AgentLoopService {
@@ -52,6 +57,7 @@ export class AgentLoopService {
     batchMs: number; batchBytes: number; pollIntervalMs: number;
   };
   private readonly now: () => Date;
+  private readonly contextPolicy: ContextWindowPolicy | null;
   private readonly tools: ToolService;
   private readonly shutdown = new AbortController();
   private readonly owned = new Set<LiveRun>();
@@ -72,6 +78,18 @@ export class AgentLoopService {
     };
     for (const value of Object.values(this.limits)) {
       if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new StoreError("invalid_options", "Loop limits must be positive 32-bit integers");
+    }
+    this.contextPolicy = options.contextPolicy ?? null;
+    if (this.contextPolicy) {
+      const integers = [this.contextPolicy.contextTokens, this.contextPolicy.executionOutputTokens,
+        this.contextPolicy.safetyTokens, this.contextPolicy.retainRawTokens, this.contextPolicy.requestByteTrigger,
+        this.contextPolicy.compactionOutputTokens];
+      if (integers.some((value) => !Number.isSafeInteger(value) || value < 1)
+        || this.contextPolicy.executionOutputTokens + this.contextPolicy.safetyTokens >= this.contextPolicy.contextTokens
+        || !(this.contextPolicy.proactiveRatio > 0 && this.contextPolicy.proactiveRatio < 1)
+        || !(this.contextPolicy.targetRatio > 0 && this.contextPolicy.targetRatio < this.contextPolicy.proactiveRatio)) {
+        throw new StoreError("invalid_options", "Context policy limits and ratios are invalid");
+      }
     }
     this.now = options.now ?? (() => new Date());
     this.tools = new ToolService(store, { now: this.now, approvalTtlMs: options.approvalTtlMs ?? 300_000, signal: this.shutdown.signal });
@@ -117,69 +135,139 @@ export class AgentLoopService {
     try {
       for (;;) {
         this.checkControl(control.signal);
-        let { state, run } = await this.load(sessionId, runId);
+        let loaded = await this.load(sessionId, runId);
+        let { state, run } = loaded;
         if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
-        const request = buildModelRequest(state, this.context);
-        const step = run.steps.size + 1;
-        const requestId = randomUUID();
-        const correlation = { run_id: runId, step, request_id: requestId, attempt: 1 };
-        await this.store.append(this.input(sessionId, "step.started", { run_id: runId, step }));
-        const start = this.input(sessionId, "model.request.started", { ...correlation, request, origin: "runner" });
-        try { this.store.checkAppendSize([start], this.limits.maxRequestBytes); }
-        catch (error) {
-          if (!(error instanceof StoreError) || error.code !== "request_too_large") throw error;
-          return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
-        }
-        this.checkControl(control.signal);
-        await this.store.append(start);
-        run = (await this.load(sessionId, runId)).run;
-        if (run.cancelRequested) control.abort("cancel_requested");
-        this.checkControl(control.signal);
-        let deltaIndex = 0;
-        let result = await executeModelRequest(this.provider, run.requests.get(requestId)!.context, {
-          signal: control.signal, timeoutMs: this.limits.requestTimeoutMs, maxOutputBytes: this.limits.maxOutputBytes,
-          batchMs: this.limits.batchMs, batchBytes: this.limits.batchBytes,
-          onDeltas: async (deltas) => {
-            const events = deltas.map((delta, index) => this.input(sessionId, "model.response.delta", {
-              ...correlation, delta_index: deltaIndex + index + 1, delta
-            }));
-            try { await this.store.appendBatch(events); }
-            catch (error) {
-              if (error instanceof StoreError && error.code === "late-event" && (await this.load(sessionId, runId)).run.cancelRequested) {
-                control.abort("cancel_requested");
-                throw "cancel_requested";
-              }
-              throw error;
+        let request = buildModelRequest(state, this.context);
+        if (this.contextPolicy) {
+          const measurement = measureContext(state, request, this.contextPolicy);
+          const trigger = compactionTrigger(measurement, this.contextPolicy);
+          if (trigger) {
+            const compacted = await this.compact(sessionId, runId, loaded, request, trigger, control.signal);
+            loaded = await this.load(sessionId, runId);
+            ({ state, run } = loaded);
+            if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+            if (compacted) request = buildModelRequest(state, this.context);
+            else if (measurement.estimated_input_tokens >= measurement.hard_input_tokens) {
+              return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
             }
-            deltaIndex += deltas.length;
           }
-        });
-        this.checkControl(control.signal);
-        run = (await this.load(sessionId, runId)).run;
-        this.checkControl(control.signal);
-        if (run.cancelRequested) result = this.cancelledRequest(run, requestId, result);
-        await this.store.append(this.input(sessionId, "model.request.finished", { ...correlation, ...result }));
-        this.checkControl(control.signal);
-        if (result.status !== "succeeded") {
-          return await this.finish(sessionId, runId, result.status === "cancelled" ? "cancelled" : "failed", result.reason, control.signal);
         }
-        if (result.output.tool_calls.length === 0) return await this.finish(sessionId, runId, "completed", "completed", control.signal);
-        for (const declaration of result.output.tool_calls) {
+        const step = run.steps.size + 1;
+        await this.store.append(this.input(sessionId, "step.started", { run_id: runId, step }));
+        let result: ModelRequestOutcome;
+        let requestId = "";
+        for (let attempt = 1; ; attempt++) {
+          this.checkControl(control.signal);
+          if (attempt > 1) request = buildModelRequest((await this.load(sessionId, runId)).state, this.context);
+          requestId = randomUUID();
+          const correlation = { run_id: runId, step, request_id: requestId, attempt };
+          const sanitizedStart = this.store.sanitizeEventInput(this.input(sessionId, "model.request.started", {
+            ...correlation, request, origin: "runner"
+          }));
+          if (sanitizedStart.type !== "model.request.started") throw new StoreError("validation_failed", "Invalid model request start");
+          request = sanitizedStart.data.request;
+          const providerRequest = this.provider.describeRequest?.(request) ?? null;
+          const start = parseEventInput({ ...sanitizedStart,
+            data: { ...sanitizedStart.data, provider_request: providerRequest } });
+          try { this.store.checkAppendSize([start], this.limits.maxRequestBytes); }
+          catch (error) {
+            if (!(error instanceof StoreError) || error.code !== "request_too_large") throw error;
+            return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
+          }
+          try { await this.store.append(start); }
+          catch (error) {
+            if (error instanceof StoreError && error.code === "session_capacity") {
+              return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
+            }
+            throw error;
+          }
+          run = (await this.load(sessionId, runId)).run;
+          if (run.cancelRequested) control.abort("cancel_requested");
+          this.checkControl(control.signal);
+          let deltaIndex = 0;
+          try {
+            result = await executeModelRequest(this.provider, run.requests.get(requestId)!.context, {
+              signal: control.signal, timeoutMs: this.limits.requestTimeoutMs, maxOutputBytes: this.limits.maxOutputBytes,
+              batchMs: this.limits.batchMs, batchBytes: this.limits.batchBytes,
+              onDeltas: async (deltas) => {
+                const events = deltas.map((delta, index) => this.input(sessionId, "model.response.delta", {
+                  ...correlation, delta_index: deltaIndex + index + 1, delta
+                }));
+                try { await this.store.appendBatch(events); }
+                catch (error) {
+                  if (error instanceof StoreError && error.code === "late-event" && (await this.load(sessionId, runId)).run.cancelRequested) {
+                    control.abort("cancel_requested");
+                    throw "cancel_requested";
+                  }
+                  throw error;
+                }
+                deltaIndex += deltas.length;
+              }
+            });
+          } catch (error) {
+            if (!(error instanceof StoreError) || error.code !== "session_capacity") throw error;
+            const saved = (await this.load(sessionId, runId)).run.requests.get(requestId)!;
+            result = {
+              status: "failed", reason: "limit_exceeded", origin: "runner",
+              output: { text: saved.deltaText, reasoning: saved.deltaReasoning || null, tool_calls: [] },
+              stop_reason: null, usage: unknownUsage(), timings: { first_content_ms: null, duration_ms: null },
+              error: { code: "session_capacity", message: "Session normal payload budget is exhausted", details: null }
+            };
+          }
           this.checkControl(control.signal);
           run = (await this.load(sessionId, runId)).run;
-          if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
-          const callId = await this.tools.prepare(sessionId, runId, declaration.provider_call_id!);
-          for (;;) {
-            this.checkControl(control.signal);
-            const advanced = await this.tools.advance(sessionId, runId, callId, control.signal);
-            if (advanced.status === "finished") break;
-            if (advanced.status === "in_progress") throw new StoreError("unowned_dispatch", "A saved tool start cannot be resumed by this loop");
-            const remaining = Math.max(1, Date.parse(advanced.expiresAt) - this.now().getTime());
-            await pause(Math.min(this.limits.pollIntervalMs, remaining), control.signal);
+          this.checkControl(control.signal);
+          if (run.cancelRequested) result = this.cancelledRequest(run, requestId, result);
+          await this.store.append(this.input(sessionId, "model.request.finished", { ...correlation, ...result }));
+          this.checkControl(control.signal);
+          if (result.status === "failed" && result.reason === "context_limit" && attempt === 1 && this.contextPolicy) {
+            loaded = await this.load(sessionId, runId);
+            const compacted = await this.compact(sessionId, runId, loaded,
+              buildModelRequest(loaded.state, this.context), "context_overflow", control.signal);
+            run = (await this.load(sessionId, runId)).run;
+            if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+            if (compacted) continue;
           }
+          if (result.status !== "succeeded") {
+            return await this.finish(sessionId, runId, result.status === "cancelled" ? "cancelled" : "failed", result.reason, control.signal);
+          }
+          break;
+        }
+        if (result.output.tool_calls.length === 0) return await this.finish(sessionId, runId, "completed", "completed", control.signal);
+        try {
+          for (const declaration of result.output.tool_calls) {
+            this.checkControl(control.signal);
+            run = (await this.load(sessionId, runId)).run;
+            if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+            const callId = await this.tools.prepare(sessionId, runId, declaration.provider_call_id!);
+            for (;;) {
+              this.checkControl(control.signal);
+              const advanced = await this.tools.advance(sessionId, runId, callId, control.signal);
+              if (advanced.status === "finished") break;
+              if (advanced.status === "in_progress") throw new StoreError("unowned_dispatch", "A saved tool start cannot be resumed by this loop");
+              const remaining = Math.max(1, Date.parse(advanced.expiresAt) - this.now().getTime());
+              await pause(Math.min(this.limits.pollIntervalMs, remaining), control.signal);
+            }
+            run = (await this.load(sessionId, runId)).run;
+            if (run.blockedReason === "cleanup_failed") return await this.finish(sessionId, runId, "failed", "cleanup_failed", control.signal);
+            if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+          }
+        } catch (error) {
+          if (!(error instanceof StoreError) || error.code !== "session_capacity") throw error;
           run = (await this.load(sessionId, runId)).run;
-          if (run.blockedReason === "cleanup_failed") return await this.finish(sessionId, runId, "failed", "cleanup_failed", control.signal);
-          if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+          const openCall = [...run.tools.values()].find((call) => ["created", "waiting_for_approval"].includes(call.status));
+          if (openCall) {
+            await this.store.append(this.input(sessionId, "tool.finished", {
+              run_id: runId, step: openCall.step, request_id: openCall.requestId, attempt: openCall.attempt,
+              call_id: openCall.callId, approval_id: openCall.approvalId, tool_name: openCall.toolName, cwd: openCall.cwd,
+              status: "failed", reason: "limit_exceeded", result: null,
+              error: { code: "session_capacity", message: "Session normal payload budget is exhausted", details: null },
+              timings: { first_content_ms: null, duration_ms: null }, exit_code: null,
+              evidence: { kind: "none", data: null }, origin: "system"
+            }));
+          }
+          return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
         }
         this.checkControl(control.signal);
         await this.store.append(this.input(sessionId, "step.finished", { run_id: runId, step, status: "completed", reason: "completed", origin: "runner" }));
@@ -211,6 +299,66 @@ export class AgentLoopService {
       }
       await pause(this.limits.pollIntervalMs, stopped);
     }
+  }
+
+  private async compact(sessionId: string, runId: string,
+    loaded: { state: ExecutionState; run: RunState; events: Event[] }, fullRequest: ModelRequestContext,
+    trigger: "token_pressure" | "request_bytes" | "context_overflow", signal: AbortSignal): Promise<boolean> {
+    if (!this.contextPolicy) return false;
+    const plan = buildCompactionPlan(loaded.state, loaded.events, fullRequest, this.contextPolicy);
+    if (!plan) return false;
+    const compactionId = randomUUID();
+    const common = { run_id: runId, compaction_id: compactionId, trigger, source: plan.source };
+    const sanitizedStart = this.store.sanitizeEventInput(this.input(sessionId, "context.compaction.started", {
+      ...common, request: plan.request, before: plan.before,
+      target_input_tokens: plan.targetInputTokens, origin: "runner"
+    }));
+    if (sanitizedStart.type !== "context.compaction.started") throw new StoreError("validation_failed", "Invalid compaction start");
+    const compactionRequest = sanitizedStart.data.request;
+    const providerRequest = this.provider.describeRequest?.(compactionRequest) ?? null;
+    const started = parseEventInput({ ...sanitizedStart,
+      data: { ...sanitizedStart.data, provider_request: providerRequest } });
+    try { this.store.checkAppendSize([started], this.limits.maxRequestBytes); }
+    catch (error) {
+      if (error instanceof StoreError && error.code === "request_too_large") return false;
+      throw error;
+    }
+    try { await this.store.append(started); }
+    catch (error) {
+      if (error instanceof StoreError && error.code === "session_capacity") return false;
+      throw error;
+    }
+    const result = await executeModelRequest(this.provider, compactionRequest, {
+      signal, timeoutMs: this.limits.requestTimeoutMs, maxOutputBytes: this.limits.maxOutputBytes,
+      batchMs: this.limits.batchMs, batchBytes: this.limits.batchBytes, onDeltas: async () => {}
+    });
+    this.checkControl(signal);
+    if (result.status === "succeeded" && result.output.tool_calls.length === 0 && result.output.text.trim()) {
+      const projected = projectedRequestAfterCompaction(plan, result.output.text, fullRequest);
+      const after = measureContext(loaded.state, projected, this.contextPolicy);
+      if (after.estimated_input_tokens <= plan.targetInputTokens && after.serialized_bytes < this.contextPolicy.requestByteTrigger) {
+        await this.store.append(this.input(sessionId, "context.compaction.succeeded", {
+          ...common, summary: result.output.text, reasoning: result.output.reasoning, stop_reason: result.stop_reason,
+          facts: plan.facts, shadowed_run_ids: plan.shadowedRunIds, shadowed_request_ids: plan.shadowedRequestIds,
+          retained_tail_tokens: plan.retainedTailTokens, after, usage: result.usage, timings: result.timings,
+          provider_response: result.provider_response ?? null, origin: "provider"
+        }));
+        return true;
+      }
+    }
+    await this.store.append(this.input(sessionId, "context.compaction.failed", {
+      ...common,
+      error: result.error ?? {
+        code: result.status === "succeeded" ? "compaction_target_missed" : "compaction_failed",
+        message: result.status === "succeeded"
+          ? "Compaction output did not satisfy the configured target without tool calls"
+          : "Context compaction did not complete successfully",
+        details: null
+      },
+      usage: result.usage, timings: result.timings, provider_response: result.provider_response ?? null,
+      origin: result.origin === "provider" ? "provider" : "runner"
+    }));
+    return false;
   }
 
   private checkControl(signal: AbortSignal): void {
@@ -267,11 +415,12 @@ export class AgentLoopService {
     return this.outcome(sessionId, settled.run);
   }
 
-  private async load(sessionId: string, runId: string): Promise<{ state: ExecutionState; run: RunState }> {
-    const state = replay(await this.store.read(sessionId));
+  private async load(sessionId: string, runId: string): Promise<{ state: ExecutionState; run: RunState; events: Event[] }> {
+    const events = await this.store.read(sessionId);
+    const state = replay(events);
     const run = state.runs.get(runId);
     if (!run) throw new StoreError("missing_run", "Run does not exist in the session");
-    return { state, run };
+    return { state, run, events };
   }
 
   private outcome(sessionId: string, run: RunState): LoopOutcome {

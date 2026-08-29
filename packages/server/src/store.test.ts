@@ -1,4 +1,4 @@
-import { mkdtemp, rm, symlink, link, writeFile, readFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, symlink, link, writeFile, readFile, mkdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -517,6 +517,94 @@ describe("SQLite worker store", () => {
     expect(await reopened.read(run.sessionId)).toEqual(committed);
     const next = await reopened.execute({ type: "run.submit", session_id: run.sessionId, command_id: "next", content: "Next" });
     expect(next.first_seq).toBe(committed.length + 1);
+  });
+
+  it("retains configured masking metadata across reopening and creates a user-only database", async () => {
+    const path = await databasePath();
+    const secret = "fixture-provider-secret";
+    const store = createStore(workerUrl, { maskSecrets: [secret] });
+    await store.open(path);
+    const session = await createSession(store, path);
+    await store.execute({ type: "run.submit", session_id: session.session_id, command_id: "masked",
+      content: `Inspect without retaining ${secret}` });
+    const running = await store.getSession(session.session_id);
+    await store.append(input("run.finished", {
+      run_id: running!.active_run_id, status: "failed", reason: "runner_error", origin: "runner"
+    }, session.session_id));
+    const before = await store.read(session.session_id);
+    const message = before.find((event) => event.type === "user.message");
+    expect(message).toMatchObject({
+      data: { content: "Inspect without retaining [MASKED]" },
+      content_metadata: [{ path: "/data/content", masked: true, mask_count: 1 }]
+    });
+    expect(JSON.stringify(before)).not.toContain(secret);
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    await store.close();
+    const reopened = createStore();
+    await reopened.open(path);
+    expect(await reopened.read(session.session_id)).toEqual(before);
+  });
+
+  it("hydrates earlier version-1 payload bodies that predate the metadata wrapper", async () => {
+    const path = await databasePath();
+    const store = createStore();
+    await store.open(path);
+    const session = await createSession(store, path);
+    const run = await store.execute({ type: "run.submit", session_id: session.session_id,
+      command_id: "legacy-payload-run", content: "Retain the legacy body" });
+    await store.append(input("run.finished", {
+      run_id: run.run_id, status: "failed", reason: "runner_error", origin: "runner"
+    }, session.session_id));
+    const expected = await store.read(session.session_id);
+    await store.close();
+
+    const db = new Database(path);
+    try {
+      const rows = db.prepare("SELECT payload_id, data_json FROM payloads").all() as Array<{ payload_id: string; data_json: string }>;
+      const update = db.prepare("UPDATE payloads SET data_json = ? WHERE payload_id = ?");
+      for (const row of rows) {
+        const wrapper = JSON.parse(row.data_json) as { __fosil_event_payload_v1: 1; data: unknown };
+        update.run(JSON.stringify(wrapper.data), row.payload_id);
+      }
+    } finally { db.close(); }
+
+    const reopened = createStore();
+    await reopened.open(path);
+    expect(await reopened.read(session.session_id)).toEqual(expected);
+  });
+
+  it("rejects normal payloads atomically at the soft budget while preserving terminal reserve", async () => {
+    const rejectedPath = await databasePath();
+    const bounded = createStore(workerUrl, { normalSessionPayloadBytes: 900, hardSessionPayloadBytes: 4_000 });
+    await bounded.open(rejectedPath);
+    const session = await createSession(bounded, rejectedPath);
+    await expect(bounded.execute({ type: "run.submit", session_id: session.session_id, command_id: "oversized",
+      content: "x".repeat(2_000) })).rejects.toMatchObject({ code: "session_capacity" });
+    expect(await bounded.getSession(session.session_id)).toMatchObject({ last_seq: 1, active_run_id: null });
+
+    const reservePath = await databasePath();
+    const reserve = createStore(workerUrl, { normalSessionPayloadBytes: 2_200, hardSessionPayloadBytes: 8_000 });
+    await reserve.open(reservePath);
+    const admitted = await createSession(reserve, reservePath, "reserve-create");
+    const run = await reserve.execute({ type: "run.submit", session_id: admitted.session_id, command_id: "reserve-run", content: "Finish safely" });
+    const correlation = { run_id: run.run_id!, step: 1, request_id: "request", attempt: 1 };
+    const event = (type: EventInput["type"], data: unknown) => input(type, data, admitted.session_id);
+    await reserve.appendBatch([
+      event("step.started", { run_id: run.run_id, step: 1 }),
+      event("model.request.started", { ...correlation, origin: "runner", request: {
+        provider: "fixture", model: "fixture", system_instructions: ["s".repeat(800)], messages: [], tools: [],
+        settings: { temperature: null, top_p: null, max_output_tokens: null }
+      } })
+    ]);
+    await reserve.appendBatch([
+      event("model.request.finished", { ...correlation, status: "succeeded", reason: "completed", origin: "provider",
+        stop_reason: "stop", output: { text: "y".repeat(1_200), reasoning: null, tool_calls: [] }, error: null,
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, cache_read_tokens: null, cache_write_tokens: null },
+        timings: { first_content_ms: null, duration_ms: 1 } }),
+      event("step.finished", { run_id: run.run_id, step: 1, status: "completed", reason: "completed" }),
+      event("run.finished", { run_id: run.run_id, status: "completed", reason: "completed", origin: "runner" })
+    ]);
+    expect(await reserve.getSession(admitted.session_id)).toMatchObject({ activity: "idle", active_run_id: null });
   });
 
   it("rejects elapsed approvals without inventing a timer or dispatch", async () => {

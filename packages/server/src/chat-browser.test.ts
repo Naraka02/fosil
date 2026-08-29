@@ -1,4 +1,5 @@
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,5 +138,67 @@ describe("product Chat controls in a real browser", () => {
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     expect(external).toEqual([]); expect(posts).toBe(7);
+  }, 30_000);
+
+  it("reconstructs correlated Trace details, unknown metrics, payload flags, and file-change evidence", async () => {
+    await access(join(webRoot, "index.html"));
+    const root = await mkdtemp(join(tmpdir(), "fosil-trace-browser-")); directories.push(root);
+    const before = "before\n", after = "after\n";
+    await writeFile(join(root, "target.txt"), before);
+    const digest = createHash("sha256").update(before).digest("hex");
+    const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
+    let calls = 0;
+    const provider: ModelProvider = { async *stream(request) {
+      calls++;
+      if (!hasToolResult(request)) yield finish("Requesting managed edit.", [{ provider_call_id: "managed-edit", name: "edit_file", arguments: { path: "target.txt", expected_sha256: digest, replacement: after } }]);
+      else yield finish("Target updated.");
+    } };
+    const server = new ExecutionHttpServer({ store, webRoot, loop: { provider, providerId: "controlled-trace", model: "fixture", pollIntervalMs: 5, batchMs: 5 }, streamPollMs: 5 });
+    servers.push(server); const origin = await server.listen();
+    const browser = await chromium.launch({ headless: true }); browsers.push(browser);
+    const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
+    let posts = 0; const external: string[] = [];
+    page.on("request", (request) => { if (request.method() === "POST") posts++; if (new URL(request.url()).origin !== origin) external.push(request.url()); });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.getByLabel("Workspace path").fill(root); await page.getByRole("button", { name: "New" }).click();
+    await page.getByRole("heading", { name: basename(root) }).waitFor();
+    await page.getByLabel("Message").fill("Edit the target"); await page.getByRole("button", { name: "Send" }).click();
+    await page.getByRole("button", { name: "Allow once" }).waitFor(); await page.getByRole("button", { name: "Allow once" }).click();
+    await page.getByText("Target updated.").waitFor();
+    expect(await readFile(join(root, "target.txt"), "utf8")).toBe(after); expect(calls).toBe(2); expect(posts).toBe(3);
+    const saved = await store.read((await store.listSessions()).sessions[0]!.session_id);
+    const firstRequest = saved.find((event) => event.type === "model.request.started")!;
+    const tool = saved.find((event) => event.type === "tool.call.created")!;
+    const approval = saved.find((event) => event.type === "approval.requested")!;
+
+    await page.getByRole("tab", { name: "Trace" }).click();
+    await page.getByRole("heading", { name: "Execution trace" }).waitFor();
+    const initialTrace = await page.locator(".trace-view").innerText();
+    expect(await page.locator(".trace-record").count()).toBe(4);
+    await page.locator(".trace-group-toggle").click(); await expect.poll(() => page.locator(".trace-record").count()).toBe(0);
+    await page.locator(".trace-group-toggle").click(); await expect.poll(() => page.locator(".trace-record").count()).toBe(4);
+    await page.locator(".trace-record").filter({ hasText: "Model · fixture" }).last().click();
+    const modelDetail = page.locator(".trace-inspector");
+    await expect.poll(() => modelDetail.innerText()).toContain(firstRequest.data.request_id);
+    expect(await modelDetail.locator(".trace-section").filter({ hasText: "Assembled output" }).innerText()).toContain("Requesting managed edit.");
+    expect(await modelDetail.locator(".trace-section").filter({ hasText: "Provider usage" }).innerText()).toContain("Unknown");
+
+    await page.locator(".trace-record").filter({ hasText: "Tool · edit_file" }).click();
+    const toolDetail = (await page.locator(".trace-inspector").innerText()).toLowerCase();
+    expect(toolDetail).toContain(tool.data.call_id); expect(toolDetail).toContain("file changes");
+    expect(toolDetail).toContain("--- a/target.txt"); expect(toolDetail).toContain("result.truncated"); expect(toolDetail).toContain("false");
+    await page.locator(".trace-record").filter({ hasText: "Approval · edit_file" }).click();
+    const approvalDetail = (await page.locator(".trace-inspector").innerText()).toLowerCase();
+    expect(approvalDetail).toContain(approval.data.approval_id); expect(approvalDetail).toContain("allowed"); expect(approvalDetail).toContain("decision source");
+    await page.getByLabel("Errors only").check(); await page.getByText("No records match this filter.").waitFor();
+    await page.getByLabel("Errors only").uncheck();
+
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.getByRole("tab", { name: "Trace" }).click();
+    await page.getByRole("heading", { name: "Execution trace" }).waitFor();
+    expect(await page.locator(".trace-view").innerText()).toBe(initialTrace); expect(posts).toBe(3); expect(calls).toBe(2);
+    await page.setViewportSize({ width: 390, height: 844 }); await page.reload({ waitUntil: "domcontentloaded" });
+    await page.getByRole("tab", { name: "Trace" }).click(); await page.getByRole("heading", { name: "Execution trace" }).waitFor();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    expect(posts).toBe(3); expect(calls).toBe(2); expect(external).toEqual([]);
   }, 30_000);
 });

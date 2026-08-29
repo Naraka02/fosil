@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Event, EventInput, ModelOutput, ModelRequestContext } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { AgentLoopService } from "./agent-loop.js";
-import type { ModelProvider } from "./model-provider.js";
+import { ModelProviderRequestError, type ModelProvider } from "./model-provider.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
 
 const directories: string[] = [];
@@ -34,6 +34,103 @@ afterEach(async () => {
   await Promise.all(services.splice(0).map((service) => service.close()));
   await Promise.all(stores.splice(0).map((store) => store.close()));
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe("agent loop context compaction", () => {
+  it("persists a proactive checkpoint and projects only its summary, facts, and recent tail", async () => {
+    const old = "old durable context ".repeat(350);
+    const f = await fixture(old);
+    const p = provider(async function* (request, _signal, index) {
+      if (index === 0) yield finish(`Apply the controlled edit and retain this current-turn detail: ${old}`, [edit()]);
+      else if (index === 1) {
+        expect(request.messages.find((message) => message.role === "tool")).toMatchObject({
+          content: { status: "succeeded" }
+        });
+        yield finish("old result complete ".repeat(30));
+      }
+      else if (request.model === "deepseek-v4-flash") yield {
+        ...finish("Older work completed and its durable outcome is retained."),
+        output: { text: "Older work completed and its durable outcome is retained.", reasoning: "Compress the settled prefix.", tool_calls: [] }
+      };
+      else {
+        expect(request.messages[0]).toMatchObject({ role: "system", content: { kind: "context_checkpoint" } });
+        expect(JSON.stringify(request.messages)).not.toContain(`Apply the controlled edit and retain this current-turn detail: ${old}`);
+        yield finish("continued after compaction");
+      }
+    });
+    const service = loop(f, p.adapter, { contextPolicy: {
+      contextTokens: 10_000, executionOutputTokens: 100, safetyTokens: 100,
+      proactiveRatio: 0.6, targetRatio: 0.59, retainRawTokens: 200,
+      requestByteTrigger: 1024 * 1024, compactionOutputTokens: 100
+    } });
+    const first = service.run(f.sessionId, f.runId);
+    await decide(f, "allow");
+    expect(await first).toMatchObject({ status: "completed" });
+    expect(await records(f, "context.compaction.started")).toHaveLength(0);
+    const next = await f.store.execute({ type: "run.submit", command_id: "second", session_id: f.sessionId, content: "Continue." });
+    expect(await service.run(f.sessionId, next.run_id!)).toMatchObject({ status: "completed", output: { text: "continued after compaction" } });
+    expect(await records(f, "context.compaction.started")).toHaveLength(1);
+    const completed = await records(f, "context.compaction.succeeded");
+    expect(completed).toHaveLength(1);
+    expect(completed[0]!.data).toMatchObject({
+      trigger: "token_pressure", summary: "Older work completed and its durable outcome is retained.",
+      reasoning: "Compress the settled prefix.", shadowed_run_ids: [f.runId]
+    });
+    expect(completed[0]!.data.facts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "file_change", text: expect.stringContaining("edit_file"),
+        source_ids: expect.arrayContaining([f.runId]) })
+    ]));
+    expect((await f.store.read(f.sessionId)).some((event) => event.type === "user.message" && event.data.content === old)).toBe(true);
+  });
+
+  it("allows exactly one new request identity after an explicit context rejection and successful compaction", async () => {
+    const old = "settled history ".repeat(120);
+    const f = await fixture(old);
+    const p = provider(async function* (request, _signal, index) {
+      if (index === 0) yield finish(`settled result ${old}`);
+      else if (index === 1) throw new ModelProviderRequestError("context_limit", {
+        code: "context_length_exceeded", message: "maximum context length exceeded", details: null
+      });
+      else if (request.model === "deepseek-v4-flash") yield finish("The prior settled run completed successfully.");
+      else yield finish("recovered once");
+    });
+    const service = loop(f, p.adapter, { contextPolicy: {
+      contextTokens: 10_000, executionOutputTokens: 100, safetyTokens: 100,
+      proactiveRatio: 0.99, targetRatio: 0.5, retainRawTokens: 100,
+      requestByteTrigger: 1024 * 1024, compactionOutputTokens: 100
+    } });
+    expect(await service.run(f.sessionId, f.runId)).toMatchObject({ status: "completed" });
+    const next = await f.store.execute({ type: "run.submit", command_id: "overflow", session_id: f.sessionId, content: "Continue." });
+    expect(await service.run(f.sessionId, next.run_id!)).toMatchObject({ status: "completed", output: { text: "recovered once" } });
+    const starts = (await records(f, "model.request.started")).filter((event) => event.data.run_id === next.run_id);
+    expect(starts.map((event) => event.data.attempt)).toEqual([1, 2]);
+    expect(new Set(starts.map((event) => event.data.request_id)).size).toBe(2);
+    expect((await records(f, "context.compaction.succeeded")).at(-1)!.data.trigger).toBe("context_overflow");
+    expect(p.requests).toHaveLength(4);
+  });
+
+  it("keeps a failed run raw even when it crosses the proactive threshold", async () => {
+    const blocked = "failed run detail ".repeat(600);
+    const f = await fixture(blocked);
+    const p = provider(async function* (request, _signal, index) {
+      if (index === 0) throw new Error("controlled provider failure");
+      expect(JSON.stringify(request.messages)).toContain(blocked);
+      yield finish("continued with the failed run preserved");
+    });
+    const service = loop(f, p.adapter, { contextPolicy: {
+      contextTokens: 10_000, executionOutputTokens: 100, safetyTokens: 100,
+      proactiveRatio: 0.6, targetRatio: 0.5, retainRawTokens: 1,
+      requestByteTrigger: 1024 * 1024, compactionOutputTokens: 100
+    } });
+    expect(await service.run(f.sessionId, f.runId)).toMatchObject({ status: "failed", reason: "provider_error" });
+    const next = await f.store.execute({ type: "run.submit", command_id: "after-failure",
+      session_id: f.sessionId, content: "Continue without hiding the blocker." });
+    expect(await service.run(f.sessionId, next.run_id!)).toMatchObject({
+      status: "completed", output: { text: "continued with the failed run preserved" }
+    });
+    expect(await records(f, "context.compaction.started")).toHaveLength(0);
+    expect(p.requests).toHaveLength(2);
+  });
 });
 
 async function fixture(content = "Inspect the controlled fixture", shared?: { store: HookStore; database: string }, storeOptions: ConstructorParameters<typeof SqliteWorkerStore>[1] = {}) {
@@ -129,6 +226,52 @@ async function expectStopped(pids: readonly number[]) {
 }
 
 describe("agent loop execution", () => {
+  it("computes provider metadata from the same masked request that is persisted and dispatched", async () => {
+    const secret = "fixture-secret-value";
+    const f = await fixture("Inspect the request boundary", undefined, { maskSecrets: [secret] });
+    const described: ModelRequestContext[] = [];
+    const received: ModelRequestContext[] = [];
+    const adapter: ModelProvider = {
+      describeRequest(request) {
+        described.push(structuredClone(request));
+        return { protocol: "responses", adapter: "fixture-responses", endpoint: "https://example.invalid/responses",
+          body_sha256: hash(JSON.stringify(request)) };
+      },
+      async *stream(request) { received.push(structuredClone(request)); yield finish("masked boundary verified"); }
+    };
+    expect(await loop(f, adapter, { systemInstructions: [`Never retain ${secret}`] }).run(f.sessionId, f.runId))
+      .toMatchObject({ status: "completed" });
+    const saved = (await records(f, "model.request.started"))[0]!;
+    expect(described).toEqual([saved.data.request]);
+    expect(received).toEqual([saved.data.request]);
+    expect(JSON.stringify(saved)).not.toContain(secret);
+    expect(saved.data.provider_request?.body_sha256).toBe(hash(JSON.stringify(saved.data.request)));
+    expect(saved.content_metadata).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "/data/request/system_instructions/0", masked: true })
+    ]));
+  });
+
+  it("uses the terminal reserve to close a run when streamed output exhausts the normal session budget", async () => {
+    const f = await fixture("Small retained input", undefined, {
+      normalSessionPayloadBytes: 8 * 1024, hardSessionPayloadBytes: 64 * 1024
+    });
+    const p = provider(async function* () {
+      yield { type: "delta", delta: { kind: "text", text: "x".repeat(16 * 1024) } };
+      yield finish("unreachable provider completion");
+    });
+    const outcome = await loop(f, p.adapter, { batchBytes: 1 }).run(f.sessionId, f.runId);
+
+    expect(outcome).toMatchObject({ status: "failed", reason: "limit_exceeded" });
+    expect(p.requests).toHaveLength(1);
+    expect(await records(f, "model.response.delta")).toHaveLength(0);
+    expect((await records(f, "model.request.finished"))[0]!.data).toMatchObject({
+      status: "failed", reason: "limit_exceeded",
+      error: { code: "session_capacity", message: "Session normal payload budget is exhausted" }
+    });
+    expect((await records(f, "step.finished"))[0]!.data).toMatchObject({ status: "failed", reason: "limit_exceeded" });
+    expect((await records(f, "run.finished"))[0]!.data).toMatchObject({ status: "failed", reason: "limit_exceeded" });
+  });
+
   it("dispatches the canonical saved JSON context when storage normalizes negative zero", async () => {
     const f = await fixture();
     const p = provider(async function* (request) {

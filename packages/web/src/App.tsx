@@ -2,9 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type { Event, SessionSummary } from "@fosil/contracts";
 import { CommandDeliveryError, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
 import { appendCanonicalEvent, EventSequenceError, projectChat, type PendingApproval } from "./chat-model.js";
+import { TraceView } from "./TraceView.js";
+import { StatusPill } from "./ui.js";
 import "./app.css";
 
 type Connection = "loading" | "live" | "reconnecting" | "offline";
+type View = "chat" | "trace";
 const savedSessionKey = "fosil.selected-session";
 const savedSession = () => { try { return localStorage.getItem(savedSessionKey); } catch { return null; } };
 const rememberSession = (value: string | null) => { try { if (value) localStorage.setItem(savedSessionKey, value); else localStorage.removeItem(savedSessionKey); } catch {} };
@@ -12,10 +15,6 @@ const shortId = (value: string) => value.length > 10 ? value.slice(0, 8) : value
 const workspaceName = (path: string) => path.split("/").filter(Boolean).at(-1) ?? path;
 const commandId = () => crypto.randomUUID();
 const json = (value: unknown) => JSON.stringify(value, null, 2);
-
-function StatusPill({ status }: { status: string }) {
-  return <span className={`status status-${status.replaceAll("_", "-")}`}><span aria-hidden="true" />{status.replaceAll("_", " ")}</span>;
-}
 
 export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -33,6 +32,7 @@ export function App() {
   const [settlingApproval, setSettlingApproval] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [uncertain, setUncertain] = useState(false);
+  const [view, setView] = useState<View>("chat");
   const bottomRef = useRef<HTMLDivElement>(null);
   const eventsRef = useRef<Event[]>([]);
   const projection = useMemo(() => projectChat(events), [events]);
@@ -173,10 +173,10 @@ export function App() {
     <main className="workspace">
       <header className="topbar">
         <div><p className="eyebrow">Chat control</p><h1>{selected ? workspaceName(selected.workspace_root) : "No session selected"}</h1>{selected && <p className="workspace-path">{selected.workspace_root}</p>}</div>
-        <div className="topbar-actions"><StatusPill status={service} /><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connection}</span>{projection.activeRunId && <button className="secondary danger" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "Cancelling" : "Cancel run"}</button>}</div>
+        <div className="topbar-actions"><div className="view-switch" role="tablist" aria-label="Session view"><button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "selected" : ""} onClick={() => setView("chat")}>Chat</button><button role="tab" aria-selected={view === "trace"} className={view === "trace" ? "selected" : ""} onClick={() => setView("trace")}>Trace</button></div><StatusPill status={service} /><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connection}</span>{projection.activeRunId && <button className="secondary danger" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "Cancelling" : "Cancel run"}</button>}</div>
       </header>
       {visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>Refresh now</button>}</div>}
-      <section className="conversation" aria-live="polite" aria-label="Conversation">
+      {view === "chat" ? <><section className="conversation" aria-live="polite" aria-label="Conversation">
         {!selected && <div className="empty-state"><p className="eyebrow">Start local</p><h2>Open a workspace session</h2><p>Enter an absolute Linux path to create durable history for a repository.</p></div>}
         {selected && !projection.runs.length && connection !== "loading" && <div className="empty-state"><p className="eyebrow">Ready</p><h2>Give the agent a concrete task</h2><p>Messages, model output, tool activity, approvals, and cancellation are reconstructed from saved events.</p></div>}
         {projection.runs.map((run) => <article className="run" key={run.runId} data-run-status={run.status}>
@@ -193,7 +193,7 @@ export function App() {
       <form className="composer" onSubmit={submit}>
         <label htmlFor="message">Message</label><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder={selected ? "Describe the task and expected result" : "Select or create a session first"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={3} />
         <div className="composer-footer"><span>{projection.activeRunId ? "One active run per session" : "Commands are sent once and progress is read from saved history"}</span><button type="submit" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}>{awaitingRun ? "Accepted" : "Send"}</button></div>
-      </form>
+      </form></> : <TraceView events={events} />}
     </main>
   </div>;
 }

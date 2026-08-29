@@ -17,10 +17,10 @@ function dispatch(message: WorkerRequest): unknown {
   switch (message.type) {
     case "open":
       if (database) throw new StoreError("already_open", "SQLite worker is already open");
-      database = StorageDatabase.open(message.path);
+      database = StorageDatabase.open(message.path, message.retention);
       return { recovery: database.recovery, protectedFiles: database.protectedFiles };
     case "append_batch": return requireDatabase().appendBatch(message.events);
-    case "command": return requireDatabase().execute(message.command);
+    case "command": return requireDatabase().execute(message.command, message.contentMetadata);
     case "read": return requireDatabase().read(message.sessionId);
     case "history_page": return requireDatabase().readPage(message.request);
     case "session": return requireDatabase().getSession(message.sessionId);

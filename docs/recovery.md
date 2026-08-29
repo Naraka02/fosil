@@ -11,6 +11,7 @@ The core exports [planRecovery(state, recordedAt)](../packages/core/src/recovery
 | Unfinished record | Recovery fact |
 | --- | --- |
 | Model request | Finish as interrupted, retaining only committed text/reasoning fragments in the output; keep tool-call fragments as trace data, with no executable calls |
+| Context compaction | Finish as failed with recovery provenance; do not create or activate a checkpoint whose provider result was not committed |
 | Pending approval | Resolve as cancelled with recovery origin and interruption reason |
 | Created, waiting, or running tool | Finish as interrupted, with unknown result, exit code, and measurements; evidence distinguishes recorded dispatch from no dispatch record |
 | Open step | Finish as interrupted after known requests, tools, and approvals settle |
@@ -42,13 +43,15 @@ No unblock command, verified post-crash process-cleanup mechanism, or uncertaint
 
 ## Model history
 
-[buildModelHistory(state)](../packages/core/src/history.ts) produces detached, provider-neutral user, assistant, and tool messages in recorded order. Its exported TypeScript union owns the projection shape. It does not modify events, write synthetic records, select a model, assemble a complete request context, or implement a provider adapter.
+[buildModelHistory(state)](../packages/core/src/history.ts) produces detached, provider-neutral system, user, assistant, and tool messages in recorded order. Its exported TypeScript union owns the projection shape. It does not modify events, write records, select a model, assemble a complete request context, or implement a provider adapter.
 
 Each successful complete assistant response retains its declared tool calls. The projection emits one correlated tool reply per declaration, in declaration order. A recorded result retains its result/error/exit data. An interrupted dispatched call has an explicit unknown execution outcome. A declared call without a normalized record in a terminal run receives a projection-only `not_started` reply with `null` result, rather than an invented successful tool result. Provenance distinguishes recorded, recovery, and projection-only content.
 
 Only successful complete model responses declare tool calls in this projection. Partial tool-call deltas and failed/cancelled/interrupted requests do not become executable calls. Interrupted text remains marked as recovery content. Open requests or unresolved calls in an active run cause `history_incomplete` instead of producing a made-up tool reply. An accepted user message before its first request can be projected normally.
 
-The [agent loop](agent-loop.md#request-assembly-and-provider-boundary) assembles and saves complete provider-neutral contexts from this projection and validates controlled-provider output. A future vendor adapter still needs provider-specific serialization, context budgeting, credentials, and masking. Protocol balance and controlled-provider request equality do not establish real-provider compatibility.
+When a successful [context checkpoint](context-compaction.md) exists, the projection emits it as a system message, skips its shadowed old user runs and request outputs, and then emits the unshadowed raw tail. Failed checkpoints and attempt-1 requests rejected for `context_limit` do not become ordinary model history. Their canonical events remain available to Chat, Trace, and recovery.
+
+The [agent loop](agent-loop.md#request-assembly-and-provider-boundary) assembles and saves complete provider-neutral contexts from this projection and validates provider output. The [DeepSeek adapter](deepseek-provider.md) owns vendor serialization and credentials, while the store owns masking and the [context policy](context-compaction.md) owns budgeting. Protocol balance and controlled-provider request equality do not establish live-provider compatibility.
 
 ## Verification and limits
 
@@ -58,4 +61,4 @@ Process tests stop an owned fixture before tool dispatch, after a recorded dispa
 
 The [tool-service tests](tool-execution.md#verification-boundary) additionally exercise result-persistence failure after an actual managed edit or shell file effect, followed by reopen. Recovery preserves the changed file, reports an unknown interrupted outcome, and prevents a repeat dispatch. It does not recover lost before/after evidence or remove orphaned temporary files.
 
-Startup replay and workspace admission currently inspect complete session histories. Paging bounds returned event count, not individual payload size or all internal memory use. Large-store performance, retention budgets, post-crash process identity checks, HTTP/SSE, and browser recovery remain outside this implementation. The [development guide](development.md#setup-and-verification-procedure) owns verification commands and environment requirements.
+Startup replay and workspace admission currently inspect complete session histories. Paging bounds returned event count, not individual payload size or all internal memory use. Per-session retained-payload budgets limit future writes but do not bound replay memory. Large-store performance and post-crash process identity checks remain outside this implementation. HTTP/SSE and browser recovery have separate controlled verification. The [development guide](development.md#setup-and-verification-procedure) owns verification commands and environment requirements.

@@ -12,6 +12,8 @@
     "packages/web"
   ],
   "scripts": {
+    "prestart": "npm run build",
+    "start": "node packages/server/dist/product-cli.js",
     "build": "tsc -b && vite build --config packages/web/vite.config.ts",
     "typecheck": "tsc -b --pretty false",
     "pretest": "npm run build",

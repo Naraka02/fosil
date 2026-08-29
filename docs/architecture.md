@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, a controlled-provider agent loop, local HTTP/SSE, and browser Chat controls, not the complete workflow defined by the [product scope](product-scope.md). The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the Foundation decisions; the [execution service and Web proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md) owns the loop phase and remaining integration decisions and acceptance conditions.
+This reference owns the implemented system composition and dependency boundaries. The repository contains shared contracts, pure state reduction, durable event storage and command acceptance, approved file and shell tools, a provider-neutral agent loop, a DeepSeek Responses adapter, automatic context compaction, local HTTP/SSE, and browser Chat and Trace controls, not the complete workflow acceptance defined by the [product scope](product-scope.md). The [implemented Foundation note](../.agents/notes/implemented/architecture/2026-08-27-execution-foundations.md) owns the Foundation decisions; the [execution service and Web proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md) owns the remaining integration acceptance conditions.
 
 ## Composition
 
@@ -10,8 +10,8 @@ This reference owns the implemented system composition and dependency boundaries
 | --- | --- | --- |
 | [contracts](../packages/contracts/src/index.ts) | Shared event/command/tool schemas and inferred TypeScript types | JSON-safe validation; no browser framework, filesystem, database, or HTTP dependency |
 | [core](../packages/core/src/index.ts) | Event reduction, pure recovery planning, provider-neutral history projection and request assembly | Depends on contracts; no timers, storage, provider I/O, or tool execution |
-| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, paged history, approved tools, live agent-loop ownership, local HTTP/SSE, and optional same-origin static delivery | Native database access stays in a Node worker; provider/file/process/network I/O stays in the server; no real-provider adapter or product launcher yet |
-| [web](../packages/web/src/App.tsx) | Product Chat controls and canonical selected-session projection | Depends on contracts, not core or server; no Trace or provider-configuration interface yet |
+| [server](../packages/server/src/index.ts) | Worker-owned storage, recovery, masking and retention, paged history, approved tools, live agent-loop ownership, DeepSeek translation, context compaction, local HTTP/SSE, product startup, and same-origin static delivery | Native database access stays in a Node worker; provider/file/process/network I/O stays in the server; browser code receives only bounded event projections |
+| [web](../packages/web/src/App.tsx) | Product Chat mutations, canonical selected-session admission, and separate Chat and Trace projections | Depends on contracts, not core or server; no provider-configuration interface or independent lifecycle authority |
 
 The shared schemas are the source of truth for event shapes; the [execution-event reference](execution-events.md) owns ordering, lifecycle, and reduction semantics. Runtime parsing rejects invalid values; TypeScript types alone are not a validation boundary. The browser probe uses fixed examples to demonstrate event-union consumption and does not create a session.
 
@@ -29,15 +29,15 @@ The [cross-workspace concurrency contract](tool-execution.md#cross-workspace-con
 
 ## Agent loop boundary
 
-The [agent-loop reference](agent-loop.md) owns request assembly, provider stream validation, live run ownership, approval advancement, and bounded progression. The service derives requests from committed history and awaits the required model/tool writes before dependent dispatch. Controlled providers exercise this interface without network model calls; vendor serialization, credentials, and product transport remain separate work.
+The [agent-loop reference](agent-loop.md) owns request assembly, provider stream validation, live run ownership, approval advancement, and bounded progression. The service derives requests from committed history and awaits the required model/tool writes before dependent dispatch. The [DeepSeek adapter](deepseek-provider.md) translates the provider-neutral context, and [context compaction](context-compaction.md) selects a durable checkpoint projection without rewriting canonical events. Controlled providers exercise the same interface without network model calls.
 
 ## HTTP boundary
 
-The [execution HTTP service](http-service.md) exposes command receipts, saved session/history reads, canonical SSE events, and an optional prebuilt browser application over an explicit loopback listener. It owns command and loop lifetimes independently of HTTP/SSE connections, with browser-origin checks and bounded stream delivery. Construction requires an open store and injected provider; it adds no provider selection or automatic runtime startup. The [Chat controls](chat-controls.md) own browser projection and mutation behavior.
+The [execution HTTP service](http-service.md) exposes command receipts, saved session/history projections, projected SSE events, and a prebuilt browser application over an explicit loopback listener. It owns command and loop lifetimes independently of HTTP/SSE connections, with browser-origin checks and bounded stream delivery. Construction requires an open store and injected provider; the [product launcher](deepseek-provider.md#product-launcher) supplies runtime configuration. The [Chat controls](chat-controls.md) own browser event admission and mutation behavior, and the [Trace inspector](trace-inspector.md) owns correlated execution presentation.
 
 ## Verification boundary
 
-The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, approved tools, the controlled-provider loop, actual HTTP/SSE connections, Chat projection, and a real Chromium workflow without a network model. Browser verification covers the bounded Chat slice; it does not satisfy Trace, real-provider, masking, retention, or complete product acceptance.
+The [development guide](development.md#setup-and-verification-procedure) owns the available commands. Tests exercise event parsing, pure lifecycle reduction, the worker storage boundary, exact secret masking, retained-payload budgets, approved tools, context compaction, injected DeepSeek streams, actual HTTP/SSE connections, separate Chat and Trace projections, and a real Chromium workflow without spending provider tokens. Browser verification covers the bounded [Chat](chat-controls.md#verification) and [Trace](trace-inspector.md#verification) slices; it does not satisfy live-provider or complete product acceptance.
 
 The separate [foundation acceptance driver and viewer](execution-foundation-acceptance.md) live in the server package as contributor verification tools. They produce a static, inspectable report from real effects and saved events using scripted model declarations. The read-only viewer has no execution endpoints and is not the product HTTP/SSE service; the report renderer is not the React Chat/Trace application.
 

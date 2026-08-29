@@ -1,12 +1,15 @@
 import {
   modelOutputSchema, modelRequestContextSchema, modelResponseDeltaEventSchema, usageSchema,
-  type Event, type ModelOutput, type ModelRequestContext, type Usage
+  providerResponseMetadataSchema,
+  type Event, type ExecutionError, type ModelOutput, type ModelRequestContext,
+  type ProviderRequestMetadata, type ProviderResponseMetadata, type Usage
 } from "@fosil/contracts";
 
 export type ModelDelta = Extract<Event, { type: "model.response.delta" }>["data"]["delta"];
 export type ModelStreamItem =
   | { type: "delta"; delta: ModelDelta }
-  | { type: "finish"; output: ModelOutput; stop_reason: string | null; usage: Usage };
+  | { type: "finish"; output: ModelOutput; stop_reason: string | null; usage: Usage;
+      provider_response?: ProviderResponseMetadata | null };
 export type ModelRequestOutcome = Omit<Extract<Event, { type: "model.request.finished" }>["data"],
   "run_id" | "step" | "request_id" | "attempt">;
 
@@ -18,6 +21,20 @@ export type ModelRequestOutcome = Omit<Extract<Event, { type: "model.request.fin
  */
 export interface ModelProvider {
   stream(request: ModelRequestContext, options: { signal: AbortSignal }): AsyncIterable<unknown>;
+  describeRequest?(request: ModelRequestContext): ProviderRequestMetadata | null;
+}
+
+/** A bounded, validated adapter failure that may be retained without serializing an arbitrary exception. */
+export class ModelProviderRequestError extends Error {
+  constructor(
+    readonly reason: "provider_error" | "context_limit" | "limit_exceeded",
+    readonly executionError: ExecutionError,
+    readonly usage?: Usage,
+    readonly providerResponse?: ProviderResponseMetadata | null
+  ) {
+    super(executionError.message);
+    this.name = "ModelProviderRequestError";
+  }
 }
 
 export interface ModelExecutionOptions {
@@ -40,7 +57,8 @@ export class ModelProviderCleanupError extends Error {
 }
 
 const unknownUsage = (): Usage => ({
-  input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null
+  input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null,
+  reasoning_tokens: null
 });
 const emptyOutput = (): ModelOutput => ({ text: "", reasoning: null, tool_calls: [] });
 const invalid = () => new ProviderFailure("invalid_provider_output", "Provider returned invalid normalized output");
@@ -58,15 +76,17 @@ function parseItem(value: unknown): ModelStreamItem {
   if (item.type === "delta" && Object.keys(item).every((key) => key === "type" || key === "delta")) {
     return { type: "delta", delta: structuredClone(modelResponseDeltaEventSchema.shape.data.shape.delta.parse(item.delta)) };
   }
-  if (item.type === "finish" && Object.keys(item).every((key) => ["type", "output", "stop_reason", "usage"].includes(key))
+  if (item.type === "finish" && Object.keys(item).every((key) => ["type", "output", "stop_reason", "usage", "provider_response"].includes(key))
     && (item.stop_reason === null || typeof item.stop_reason === "string")) {
     return { type: "finish", output: structuredClone(modelOutputSchema.parse(item.output)),
-      stop_reason: item.stop_reason, usage: usageSchema.parse(item.usage) };
+      stop_reason: item.stop_reason, usage: usageSchema.parse(item.usage),
+      ...(Object.hasOwn(item, "provider_response")
+        ? { provider_response: item.provider_response === null ? null : providerResponseMetadataSchema.parse(item.provider_response) } : {}) };
   }
   throw invalid();
 }
 
-type ReadResult = { kind: "read"; result: IteratorResult<unknown>; receivedAt: number } | { kind: "read_error" };
+type ReadResult = { kind: "read"; result: IteratorResult<unknown>; receivedAt: number } | { kind: "read_error"; error: unknown };
 type Stop = { kind: "stop" };
 
 /** No retry: one provider invocation, ordered durable chunks, then one outcome. */
@@ -84,10 +104,13 @@ export async function executeModelRequest(
   let ended: number | null = null;
   let firstContent: number | null = null;
   const outcome = (status: ModelRequestOutcome["status"], reason: ModelRequestOutcome["reason"],
-    output: ModelOutput, error: ModelRequestOutcome["error"], finish?: Extract<ModelStreamItem, { type: "finish" }>): ModelRequestOutcome => ({
-    status, reason, output, error, stop_reason: finish?.stop_reason ?? null, usage: finish?.usage ?? unknownUsage(),
+    output: ModelOutput, error: ModelRequestOutcome["error"], finish?: Extract<ModelStreamItem, { type: "finish" }>,
+    providerResponse?: ProviderResponseMetadata | null, usage?: Usage): ModelRequestOutcome => ({
+    status, reason, output, error, stop_reason: finish?.stop_reason ?? null, usage: usage ?? finish?.usage ?? unknownUsage(),
     timings: { first_content_ms: firstContent, duration_ms: started === null ? null : Math.max(0, (ended ?? performance.now()) - started) },
-    origin: status === "succeeded" || reason === "provider_error" ? "provider" : "runner"
+    ...(finish?.provider_response !== undefined || providerResponse !== undefined
+      ? { provider_response: finish?.provider_response ?? providerResponse ?? null } : {}),
+    origin: status === "succeeded" || ["provider_error", "context_limit"].includes(reason) ? "provider" : "runner"
   });
   if (options.signal.aborted) {
     if (options.signal.reason !== "cancel_requested") throw options.signal.reason;
@@ -118,7 +141,7 @@ export async function executeModelRequest(
   let observedReasoning = "";
   const observedCallIds = new Set<string>();
   let finish: Extract<ModelStreamItem, { type: "finish" }> | undefined;
-  let failure: ProviderFailure | undefined;
+  let failure: ProviderFailure | ModelProviderRequestError | undefined;
   let callbackFailure: { error: unknown } | undefined;
   let cleanupFailed = false;
   const checkDeadline = () => {
@@ -161,7 +184,7 @@ export async function executeModelRequest(
       const receivedAt = performance.now();
       if (result?.done === true) exhausted = true;
       return { kind: "read", result, receivedAt };
-    } catch { return { kind: "read_error" }; }
+    } catch (error) { return { kind: "read_error", error }; }
   });
   const flushDue = async () => {
     if (pendingSince !== null && performance.now() - pendingSince >= options.batchMs) await flush();
@@ -185,7 +208,7 @@ export async function executeModelRequest(
       if (result.kind === "stop") throw stop;
       if (result.kind === "flush") { await flush(); continue; }
       next = undefined;
-      if (result.kind === "read_error") throw new ProviderFailure("provider_error", "Provider request failed");
+      if (result.kind === "read_error") throw result.error;
       if (result.result.done) {
         if (!finish) throw invalid();
         await flush();
@@ -230,7 +253,8 @@ export async function executeModelRequest(
       next = read();
     }
   } catch (error) {
-    if (error !== stop) failure = error instanceof ProviderFailure ? error : new ProviderFailure("provider_error", "Provider request failed");
+    if (error !== stop) failure = error instanceof ProviderFailure || error instanceof ModelProviderRequestError
+      ? error : new ProviderFailure("provider_error", "Provider request failed");
     abort(error);
   } finally {
     clearBatchTimer();
@@ -267,6 +291,10 @@ export async function executeModelRequest(
       return outcome("cancelled", "cancel_requested", committed, null);
     }
     if (timedOut) return outcome("failed", "timeout", committed, { code: "provider_timeout", message: "Provider request timed out", details: null });
+    if (failure instanceof ModelProviderRequestError) {
+      return outcome("failed", failure.reason, committed, failure.executionError, undefined,
+        failure.providerResponse, failure.usage);
+    }
     return outcome("failed", failure!.code === "output_limit" ? "limit_exceeded" : "provider_error", committed,
       { code: failure!.code, message: failure!.message, details: null });
   }
