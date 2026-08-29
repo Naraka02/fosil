@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
@@ -218,6 +218,32 @@ describe("execution HTTP commands and reads", () => {
 });
 
 describe("execution HTTP trust boundary", () => {
+  it("serves only an explicitly configured same-origin browser build", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fosil-static-")); directories.push(root);
+    const webRoot = join(root, "build"); await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(join(webRoot, "index.html"), "<!doctype html><title>Fosil</title>");
+    await writeFile(join(webRoot, "assets", "app.js"), "document.body.dataset.ready='true'");
+    await writeFile(join(webRoot, "assets", "app.css"), "body{color:black}");
+    await writeFile(join(root, "outside.js"), "private");
+    await symlink(join(root, "outside.js"), join(webRoot, "assets", "linked.js"));
+    const store = new HookStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
+    const server = new ExecutionHttpServer({ store, webRoot, loop: { provider: { async *stream() { yield finish(); } }, providerId: "static", model: "fixture" } });
+    servers.push(server); const origin = await server.listen();
+    const index = await raw(origin, "/");
+    expect(index.status).toBe(200); expect(index.body).toContain("<title>Fosil</title>");
+    expect(index.headers["content-type"]).toContain("text/html");
+    expect(index.headers["content-security-policy"]).toContain("connect-src 'self'");
+    const script = await raw(origin, "/assets/app.js");
+    expect(script.status).toBe(200); expect(script.headers["content-type"]).toContain("text/javascript");
+    for (const path of ["/assets/missing.js", "/assets/app.txt", "/assets/linked.js", "/assets/%2e%2e%2findex.html", "/src/main.tsx", "/favicon.ico", "/events.db"]) {
+      expect((await raw(origin, path)).status).toBe(404);
+    }
+    expect(() => new ExecutionHttpServer({ store, webRoot: join(root, "missing"), loop: { provider: { async *stream() { yield finish(); } }, providerId: "bad", model: "fixture" } })).toThrowError(/Web root/);
+    const linkedBuild = join(root, "linked-build"); await mkdir(linkedBuild); await writeFile(join(linkedBuild, "index.html"), "linked");
+    await symlink(join(webRoot, "assets"), join(linkedBuild, "assets"));
+    expect(() => new ExecutionHttpServer({ store, webRoot: linkedBuild, loop: { provider: { async *stream() { yield finish(); } }, providerId: "linked", model: "fixture" } })).toThrowError(/Web root/);
+  });
+
   it("rejects bad Host, Origin, Fetch Metadata and duplicate security headers before writes or stream allocation", async () => {
     const f = await fixture();
     const command = JSON.stringify({ type: "session.create", command_id: "create", workspace_root: f.root });

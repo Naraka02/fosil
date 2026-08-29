@@ -1,4 +1,7 @@
 import Fastify, { type FastifyReply } from "fastify";
+import { readFile } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, join } from "node:path";
 import {
   commandSchema, historyPageRequestSchema, historyQuerySchema, sequenceTextSchema, sessionListQuerySchema,
   sessionParamsSchema, streamQuerySchema, type Command, type CommandAck
@@ -16,6 +19,7 @@ export interface ExecutionHttpOptions {
   heartbeatMs?: number;
   maxFrameBytes?: number;
   drainTimeoutMs?: number;
+  webRoot?: string;
 }
 
 class HttpError extends Error {
@@ -36,6 +40,7 @@ export class ExecutionHttpServer {
   private readonly loop: AgentLoopService;
   private readonly store: SqliteWorkerStore;
   private readonly limits;
+  private readonly webRoot: string | undefined;
   private authority: string | undefined;
   private phase: "ready" | "failed" | "stopping" = "ready";
   private readonly commands = new Set<Promise<CommandAck>>();
@@ -52,6 +57,7 @@ export class ExecutionHttpServer {
     for (const value of Object.values(this.limits)) {
       if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new StoreError("invalid_options", "HTTP limits must be positive 32-bit integers");
     }
+    this.webRoot = this.resolveWebRoot(options.webRoot);
     this.store = options.store;
     // Construction requires a store that has completed its recovery barrier.
     void this.store.protectedFiles;
@@ -59,7 +65,9 @@ export class ExecutionHttpServer {
     this.app = Fastify({ bodyLimit: this.limits.bodyLimitBytes, exposeHeadRoutes: false, requestTimeout: 30_000 });
     this.app.addHook("onRequest", async (request, reply) => {
       reply.header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff")
-        .header("Referrer-Policy", "no-referrer").header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+        .header("Referrer-Policy", "no-referrer").header("Content-Security-Policy", this.webRoot
+          ? "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+          : "default-src 'none'; frame-ancestors 'none'");
       const headers = request.headers;
       const guarded = new Set(["host", "origin", "sec-fetch-site", "content-type", "last-event-id"]);
       const seen = new Set<string>();
@@ -87,6 +95,16 @@ export class ExecutionHttpServer {
       void reply.code(failure.status).send({ error: { code: failure.code, message: failure.message } });
     });
     this.app.setNotFoundHandler((_request, reply) => reply.code(404).send({ error: { code: "not_found", message: "Route not found" } }));
+    if (this.webRoot) {
+      this.app.get("/", async (_request, reply) => this.staticFile(reply, "index.html", "text/html; charset=utf-8"));
+      this.app.get<{ Params: { name: string } }>("/assets/:name", async (request, reply) => {
+        const name = request.params.name;
+        if (name !== basename(name) || !/^[A-Za-z0-9._-]+$/.test(name)) throw new HttpError(404, "not_found", "Route not found");
+        const type = name.endsWith(".js") ? "text/javascript; charset=utf-8" : name.endsWith(".css") ? "text/css; charset=utf-8" : undefined;
+        if (!type) throw new HttpError(404, "not_found", "Route not found");
+        return this.staticFile(reply, join("assets", name), type);
+      });
+    }
     this.app.get("/api/status", async () => ({ status: this.phase }));
     this.app.post("/api/commands", async (request) => this.execute(parse(commandSchema, request.body)));
     this.app.get("/api/sessions", async (request) => {
@@ -164,6 +182,30 @@ export class ExecutionHttpServer {
     this.commands.add(pending);
     void pending.then(() => this.commands.delete(pending), () => this.commands.delete(pending));
     return pending;
+  }
+
+  private resolveWebRoot(value: string | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    try {
+      if (!isAbsolute(value) || value.includes("\0")) throw new Error("invalid path");
+      const root = realpathSync(value);
+      const index = join(root, "index.html"), assets = join(root, "assets");
+      if (!statSync(root).isDirectory() || realpathSync(index) !== index || !statSync(index).isFile()
+        || realpathSync(assets) !== assets || !statSync(assets).isDirectory()) throw new Error("invalid build");
+      return root;
+    } catch {
+      throw new StoreError("invalid_options", "Web root must be a built application directory");
+    }
+  }
+
+  private async staticFile(reply: FastifyReply, relative: string, contentType: string): Promise<FastifyReply> {
+    try {
+      const path = realpathSync(join(this.webRoot!, relative));
+      if (path !== join(this.webRoot!, relative) || !statSync(path).isFile()) throw new Error("invalid static file");
+      return reply.type(contentType).send(await readFile(path));
+    } catch {
+      throw new HttpError(404, "not_found", "Route not found");
+    }
   }
 
   private fail(): void {

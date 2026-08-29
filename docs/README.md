@@ -14,6 +14,7 @@ This page routes readers to the owner of a topic. It is not a progress tracker o
 | Reproduce and inspect the execution foundation checkpoint | [Execution Foundation acceptance](execution-foundation-acceptance.md) |
 | Understand and verify the controlled-provider loop | [Agent loop](agent-loop.md), then [Agent Loop acceptance](agent-loop-acceptance.md) |
 | Integrate local commands, history reads and event streams | [Execution HTTP service](http-service.md) |
+| Understand the product browser workflow | [Chat controls](chat-controls.md) |
 | Understand event validation and state transitions | [Execution events and state reduction](execution-events.md) |
 | Understand durable command acceptance and storage | [Event store and command acceptance](event-store.md) |
 | Understand restart and model-history construction | [Startup recovery and model history](recovery.md) |

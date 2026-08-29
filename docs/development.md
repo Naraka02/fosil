@@ -14,15 +14,16 @@ With Node.js 24 and npm on `PATH`, run these commands from the repository root:
 
 ```sh
 npm ci
+npx playwright install chromium
 npm run typecheck
 npm run build
 npm test
 npm run sqlite:probe
 ```
 
-`npm ci` installs the repository lockfile without resolving a new dependency set. Installation may need network access and, when no compatible SQLite addon binary is available, native build tools. Type checking uses TypeScript project references and emits intermediate build artifacts; it is not a no-output lint command. The build also bundles the browser probe. Tests compile their prerequisites before running Vitest. Run the build before the standalone SQLite probe, which creates and removes a temporary database.
+`npm ci` installs the repository lockfile without resolving a new dependency set. Installation may need network access and, when no compatible SQLite addon binary is available, native build tools. Playwright installs its matching Chromium runtime separately. Type checking uses TypeScript project references and emits intermediate build artifacts; it is not a no-output lint command. The build bundles the Chat application. Tests run that build before Vitest so the real-browser fixture serves current assets. Run the build before the standalone SQLite probe, which creates and removes a temporary database.
 
-The [architecture reference](architecture.md) defines the implemented boundaries. No provider credentials are needed for these checks. The [Execution Foundation acceptance procedure](execution-foundation-acceptance.md) adds a reproducible visible report and a read-only local viewer; the [Agent Loop acceptance procedure](agent-loop-acceptance.md) verifies the production loop with a controlled provider and real tools. The [HTTP service checks](http-service.md#verification) use actual loopback connections and require local listening permissions. There is no CI workflow, committed browser automation suite, or complete coding-agent application yet.
+The [architecture reference](architecture.md) defines the implemented boundaries. No provider credentials are needed for these checks. The [Execution Foundation acceptance procedure](execution-foundation-acceptance.md) adds a reproducible visible report and a read-only local viewer; the [Agent Loop acceptance procedure](agent-loop-acceptance.md) verifies the production loop with a controlled provider and real tools. The [HTTP service checks](http-service.md#verification) use actual loopback connections and require local listening permissions. The [Chat checks](chat-controls.md#verification) additionally launch local Chromium. There is no CI workflow or complete coding-agent application yet.
 
 On WSL, ensure `TMPDIR` names an existing, writable Linux directory. If the shell inherits an unavailable Windows temporary path, run the test and probe commands with `TMPDIR=/tmp`; no change to the system default Node installation is required.
 

@@ -1,0 +1,75 @@
+import {
+  apiErrorSchema, commandAckSchema, eventSchema, historyPageSchema, serviceStatusSchema, sessionListSchema,
+  type Command, type CommandAck, type Event, type SessionList, type SessionSummary
+} from "@fosil/contracts";
+import { appendCanonicalEvent } from "./chat-model.js";
+
+export interface ServiceStatus { status: "ready" | "failed" | "stopping" }
+
+export class CommandDeliveryError extends Error {
+  constructor(message: string, readonly uncertain: boolean) { super(message); }
+}
+
+async function responseJson(response: Response): Promise<unknown> {
+  try { return await response.json(); } catch { throw new Error(`Server returned HTTP ${response.status} without valid JSON`); }
+}
+
+async function get<T>(path: string, schema: { parse(value: unknown): T }, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, signal ? { signal } : undefined);
+  const body = await responseJson(response);
+  if (!response.ok) {
+    const failure = apiErrorSchema.safeParse(body);
+    throw new Error(failure.success ? failure.data.error.message : `Request failed with HTTP ${response.status}`);
+  }
+  return schema.parse(body);
+}
+
+export async function loadServiceStatus(signal?: AbortSignal): Promise<ServiceStatus> {
+  return get("/api/status", serviceStatusSchema, signal);
+}
+
+export async function loadSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
+  const sessions: SessionSummary[] = [];
+  let after: string | null = null;
+  do {
+    const query: string = after === null ? "?limit=200" : `?after=${encodeURIComponent(after)}&limit=200`;
+    const page: SessionList = await get(`/api/sessions${query}`, sessionListSchema, signal);
+    sessions.push(...page.sessions); after = page.next_after;
+  } while (after !== null);
+  return sessions;
+}
+
+export async function loadHistory(sessionId: string, signal?: AbortSignal): Promise<Event[]> {
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/history`;
+  let page = await get(`${path}?limit=200`, historyPageSchema, signal);
+  let events: Event[] = [];
+  for (const event of page.events) events = appendCanonicalEvent(events, event);
+  while (!page.done) {
+    page = await get(`${path}?limit=200&cursor=${encodeURIComponent(JSON.stringify(page.cursor))}`, historyPageSchema, signal);
+    for (const event of page.events) events = appendCanonicalEvent(events, event);
+  }
+  return events;
+}
+
+export async function sendCommand(command: Command): Promise<CommandAck> {
+  let response: Response;
+  try { response = await fetch("/api/commands", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(command) }); }
+  catch { throw new CommandDeliveryError("Could not reach the execution service", true); }
+  let body: unknown;
+  try { body = await responseJson(response); }
+  catch (failure) { throw new CommandDeliveryError(failure instanceof Error ? failure.message : "Command response was invalid", true); }
+  if (!response.ok) {
+    const failure = apiErrorSchema.safeParse(body);
+    throw new CommandDeliveryError(failure.success ? failure.data.error.message : `Command failed with HTTP ${response.status}`, false);
+  }
+  try {
+    const ack = commandAckSchema.parse(body);
+    const correlated = ack.command_id === command.command_id
+      && (command.type === "session.create" ? ack.run_id === null : (ack.session_id === command.session_id && ack.run_id !== null))
+      && (command.type !== "run.cancel" && command.type !== "approval.resolve" || ack.run_id === command.run_id);
+    if (!correlated) throw new Error("receipt correlation mismatch");
+    return ack;
+  } catch { throw new CommandDeliveryError("The service returned an invalid command receipt", true); }
+}
+
+export function parseStreamEvent(value: string): Event { return eventSchema.parse(JSON.parse(value)); }

@@ -8,7 +8,7 @@ The [implemented Execution Foundation](../../implemented/architecture/2026-08-27
 
 ## Proposal
 
-This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop and local HTTP/SSE transport are implemented and verified for slices 6 and 7; product browser controls and real-provider acceptance remain unfinished, so the enclosing note remains proposed. Its filename retains the original proposal date; the split does not approve new scope, change technology choices, or restart completed Foundation work. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements. Foundation closeout does not implement this proposal.
+This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop, local HTTP/SSE transport, and Chat controls are implemented and verified for slices 6 through 8; Trace and real-provider acceptance remain unfinished, so the enclosing note remains proposed. Its filename retains the original proposal date; the split does not approve new scope, change technology choices, or restart completed Foundation work. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements. Foundation closeout does not implement this proposal.
 
 ### Composition and technology
 
@@ -18,7 +18,7 @@ Extend the existing local backend host with an execution service and product HTT
 | --- | --- | --- |
 | Execution service | TypeScript/Node on the Foundation runtime, with explicit run ownership and a provider adapter | Reuses the selected language and durable contracts; controlled-provider lifetime and cancellation are implemented, while vendor integration remains open |
 | HTTP | Fastify 5 with shared Zod 4 boundary validation | Keeps the framework outside the loop and avoids a second handwritten command schema; the existing acceptance viewer is not this service |
-| Browser | React, TypeScript, and Vite | Extends the contract probe into Chat and Trace without the upstream plugin platform or SSR |
+| Browser | React, TypeScript, and Vite | Implements Chat now and later Trace without the upstream plugin platform or SSR |
 | Transport | JSON HTTP commands and reads; one SSE connection for the selected session | Commands do not need duplex transport; reconnect and slow-client handling remain application responsibilities |
 | Verification | Vitest for service/API/projections and Playwright for browser workflows | Controlled fixtures need no live provider; isolated report checks do not replace a committed product browser suite |
 
@@ -60,6 +60,16 @@ Session listing uses bounded lexical identity paging rather than introducing tit
 
 Verification uses controlled providers, real HTTP sockets and SQLite, including lost response receipts, disconnect during execution, stale/invalid cursors, replay and reconnect races, duplicate delivery, slow readers, shutdown, and rejected browser origins. It introduces neither product UI nor a real-provider CLI; sensitive-data, retention, masking and remaining product obligations stay deferred. The enclosing note remains proposed until its remaining slices are effective.
 
+### Chat controls phase
+
+Slice 8 serves the separately built React application from the existing loopback origin and adds the first product browser workflow: create or select a saved session, submit a message, follow committed output, resolve a pending approval, and request cancellation. The browser derives its selected-session view from canonical history and SSE events; it does not add a conversation database, browser-authored lifecycle records, or a second execution state machine. Trace inspection and provider configuration remain separate later slices.
+
+The client loads a complete fixed history prefix before opening EventSource after that prefix. It accepts only schema-valid events, deduplicates identical session and sequence pairs, requires contiguous sequence application, and rebuilds from history after a gap or conflicting duplicate. Final model output replaces accumulated deltas for that request so reopening does not double text. Session summaries may refresh independently, but only canonical events determine messages, activity, actionable approvals, and cancellation state.
+
+Every user action creates one command identity and sends it once. Network failure is reported without an automatic mutation retry; refresh performs reads and reconnects only. Approval buttons exist only for an unresolved saved approval, and the UI disables repeated action while its command is in flight. Browser verification uses the production loop, real SQLite, actual loopback HTTP/SSE, and a controlled provider to prove that refresh neither resubmits a run nor repeats an approved effect or revives a settled approval.
+
+The server accepts an optional canonical build directory at construction and exposes only its entry document and generated static assets. Static paths cannot escape that directory, unknown files remain 404, API and SSE routes retain their existing trust checks, and the browser receives a same-origin Content Security Policy. The caller still owns build selection, store opening, listening, and shutdown; importing the module performs none of them.
+
 ### Durable ordering and streaming
 
 The [implemented stream boundary](../../../../docs/agent-loop.md#durable-progression-and-streaming) commits short ordered chunks and measures provider-observed first content before batching. The dependent Web transport must preserve that ordering. A UI sees a chunk only after commit, so a crash may lose an unseen buffered tail but does not turn an already displayed durable chunk into missing saved history.
@@ -68,7 +78,7 @@ Before model or tool dispatch, commit its input, required permission decision, a
 
 If storage fails, stop accepting submissions and dispatching new operations, request cleanup of active operations, and expose an out-of-band service error. An error that cannot be committed is not assigned a durable seq or presented as a saved event. Reopening the last committed prefix classifies unfinished work as interrupted; it cannot assert that an unrecorded tool effect did not happen.
 
-Publish only committed events and treat notifications as wake-up hints. The [command receipt contract](../../../../docs/event-store.md#commands-and-receipts) already defines retry identities and acknowledgements; preserve them through HTTP and never interpret a duplicate receipt as another dispatch request. Session discovery has a [transport API](../../../../docs/http-service.md#http-interface); browser controls and separate retained-payload inspection remain unfinished.
+Publish only committed events and treat notifications as wake-up hints. The [command receipt contract](../../../../docs/event-store.md#commands-and-receipts) already defines retry identities and acknowledgements; preserve them through HTTP and never interpret a duplicate receipt as another dispatch request. Session discovery has a [transport API](../../../../docs/http-service.md#http-interface) consumed by the [Chat controls](../../../../docs/chat-controls.md); separate retained-payload inspection remains unfinished.
 
 ### Reconnection and restart
 
@@ -145,6 +155,16 @@ An actual nonreading TCP socket exercised backpressure timeout and proved that n
 
 This evidence is local transport acceptance with controlled non-sensitive fixtures. It does not verify product browser workflows, real models, masking, retention budgets, byte-bounded history responses, or large-session performance. The earlier checkpoint tags remain fixed.
 
+### Chat controls verification
+
+The Node.js 24.20.0 typecheck, production build, standalone SQLite probe, dependency audit, and full Vitest suite passed after slice 8. The suite contains 270 tests in 14 files. The dependency audit reported zero known vulnerabilities at review time. Playwright 1.62.1 launched its matching Chromium 151 runtime against the built application, actual loopback HTTP/SSE, the production loop, real SQLite, and approved Shell fixtures without a network model.
+
+Projection tests verify final model output replaces accumulated deltas, only unresolved approvals remain actionable, exact duplicate events deduplicate, and sequence gaps, conflicting duplicates, or cross-session events fail closed. Command-client tests distinguish validated rejection from uncertain delivery and require a receipt correlated to the submitted identity and session. HTTP tests verify explicit build-root validation, same-origin content policy, valid entry and generated assets, and rejection of missing files, unsupported types, traversal, and symbolic-link escapes. Existing transport, loop, tool, store, recovery, and acceptance regressions passed in the same full suite.
+
+The committed browser workflow observes durable streaming before the provider finishes, refreshes with an approval pending without another model request or effect, allows one Shell marker exactly once, reopens without reviving that approval, denies another marker with no effect, reopens without approval controls, cancels and cleans a waiting provider, and reopens the cancelled run without another request. It also checks a 390-pixel viewport without horizontal overflow and observes no external resource request. Separate desktop and mobile screenshots were reviewed locally for hierarchy, density, status visibility, and responsive reading order; those temporary images are review aids, not retained acceptance artifacts.
+
+This evidence establishes the bounded [Chat contract](../../../../docs/chat-controls.md), not Trace, real-provider behavior, a product launcher, masking, retention budgets, byte-bounded history responses, sensitive-repository use, or large-session performance. The enclosing note remains proposed and the earlier checkpoint tags remain fixed.
+
 ### Implementation slices
 
 The original slice numbers are retained for continuity; completed slices 1 through 5c are covered by the [Foundation closeout](../../implemented/architecture/2026-08-27-execution-foundations.md#foundation-phase-closeout) and are no longer an active implementation plan.
@@ -153,11 +173,11 @@ The original slice numbers are retained for continuity; completed slices 1 throu
 | --- | --- | --- |
 | 6. Loop with a controlled provider | Verified Foundation and approved [phase decisions](#controlled-provider-loop-phase) | Implemented and checked by the [controlled-provider verification](#controlled-provider-verification), without a browser or real provider |
 | 7. HTTP and SSE | Foundation and 6 | Implemented and checked by the [HTTP/SSE verification](#http-and-sse-verification), with controlled providers and no product browser UI |
-| 8. Chat controls | 7 | Session selection, composer, streaming messages, approval and cancel actions; browser tests prove refresh neither resubmits work nor revives a settled approval |
+| 8. Chat controls | 7 | Implemented and checked by the [Chat controls verification](#chat-controls-verification), including real-browser refresh, approval, effect, denial, cancellation, and narrow-viewport behavior |
 | 9. Trace inspector | 8 | Grouped ledger and input/output/timing/diff inspection; verify exact request correlation, final-vs-delta deduplication, unknown metrics, payload flags, and identical reopened facts |
 | 10. Real provider and acceptance | 6-9 plus provider selection | Lock one adapter's model/context/usage behavior and disable hidden retries; run the approved bug-fix and failure scenarios with preserved evidence and no automatic commit or push |
 
-Review evidence at each slice before starting dependent behavior. The controlled-provider loop is a deterministic test boundary, not final real-provider acceptance. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns commands that exist; the product browser and real-provider workflow tests in the remaining slices are requirements, not available tooling.
+Review evidence at each slice before starting dependent behavior. The controlled-provider loop is a deterministic test boundary, not final real-provider acceptance. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns commands that exist; Trace and real-provider workflow tests in the remaining slices are requirements, not available tooling.
 
 ## Risks
 

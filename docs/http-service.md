@@ -2,11 +2,13 @@
 
 Document type: reference.
 
-This reference owns the local HTTP command/read boundary, SSE delivery, browser-origin checks, and transport lifecycle. The [service Agent Note](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#http-and-sse-phase) records the phase decision. The [event store](event-store.md) owns durable receipts and history; the [agent loop](agent-loop.md) owns execution and provider cleanup. This transport is verified with controlled providers and non-sensitive fixtures, not a real model or a product browser application.
+This reference owns the local HTTP command/read boundary, static application delivery, SSE delivery, browser-origin checks, and transport lifecycle. The [service Agent Note](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#http-and-sse-phase) records the transport decision. The [event store](event-store.md) owns durable receipts and history; the [agent loop](agent-loop.md) owns execution and provider cleanup; the [Chat reference](chat-controls.md) owns browser behavior. This service is verified with controlled providers and non-sensitive fixtures, not a real model.
 
 ## Construction and ownership
 
-[ExecutionHttpServer](../packages/server/src/execution-http.ts) takes an already-open `SqliteWorkerStore` and `AgentLoopOptions`. Construction checks that store opening and recovery completed, constructs its own loop, and opens no listening socket. `listen(port = 0)` binds only `127.0.0.1`; zero selects an ephemeral port. The returned HTTP origin includes the actual port. There is no real-provider selection, command-line launcher, static Web application, or automatic workspace discovery in this phase.
+[ExecutionHttpServer](../packages/server/src/execution-http.ts) takes an already-open `SqliteWorkerStore`, `AgentLoopOptions`, and an optional absolute `webRoot`. Construction checks that store opening and recovery completed, constructs its own loop, and opens no listening socket. When present, `webRoot` must resolve to a directory containing a regular `index.html` and `assets` directory; invalid or missing builds fail construction. `listen(port = 0)` binds only `127.0.0.1`; zero selects an ephemeral port. The returned HTTP origin includes the actual port. There is no real-provider selection, command-line launcher, or automatic workspace discovery.
+
+With `webRoot`, `GET /` serves the entry document and `GET /assets/:name` serves regular generated JavaScript or CSS files from the canonical build directory. Nested paths, unsupported extensions, missing files, and symbolic-link escapes remain 404. The server does not expose source files, database files, directory listings, or an arbitrary static-filesystem route. Without `webRoot`, these routes remain absent and the existing API-only behavior is unchanged.
 
 The host admits commands independently of the HTTP response lifetime. After `run.submit` commits, it asks the loop to own that accepted run without awaiting completion in the response. A disconnected response or SSE connection never grants approval or cancels execution. An exact retry keeps the original command identity and payload, returns the existing receipt, and joins the live run or reads its terminal outcome without repeating effects. A receipt confirms durable acceptance, not successful execution or guaranteed response delivery.
 
@@ -21,6 +23,7 @@ All paths are relative to the exact origin returned by `listen`. The [shared con
 | Method and path | Input and result |
 | --- | --- |
 | `GET /api/status` | Process-local `ready`, `failed`, or `stopping` status |
+| `GET /` and `GET /assets/:name` | Optional prebuilt browser entry document and flat JavaScript or CSS asset |
 | `POST /api/commands` | Existing `Command` JSON; returns its committed `CommandAck` with HTTP 200 |
 | `GET /api/sessions` | Optional `after` session identity and `limit`; returns `sessions` and `next_after` |
 | `GET /api/sessions/:sessionId` | Saved session summary; unknown session returns 404 |
@@ -39,13 +42,13 @@ The stream starts strictly after its cursor. On the initial request, supply `aft
 
 The server captures a committed high-water mark, reads that fixed prefix one event at a time, and then captures another prefix. Polling committed history removes the gap between an initial read and subscription without relying on lossy notifications. Events committed during initial reads, response setup, or later polling appear in a subsequent prefix. Client disconnect stops only that stream; reconnect reconstructs delivery from the saved sequence.
 
-Delivery can repeat an already-consumed event when a client reconnects from an older cursor. Consumers must deduplicate by session and sequence and apply only a contiguous prefix. A gap or incompatible projection requires rebuilding from history, not silently advancing the cursor. This phase has protocol tests but no product browser consumer. Opening or reconstructing history never resubmits a command.
+Delivery can repeat an already-consumed event when a client reconnects from an older cursor. Consumers must deduplicate by session and sequence and apply only a contiguous prefix. A gap or incompatible projection requires rebuilding from history, not silently advancing the cursor. The [Chat consumer](chat-controls.md#saved-state-projection) implements these rules. Opening or reconstructing history never resubmits a command.
 
 ## Browser trust boundary
 
 The Host header must equal the numeric loopback authority and actual bound port. `localhost`, alternate ports, forwarded-host headers, absolute-form URLs, and arbitrary hostnames do not expand that authority. A present Origin must equal the serving origin. Fetch Metadata, when present, must identify `same-origin` or `none`; cross-site and same-site requests are refused. Mutations additionally require that exact Origin and `application/json`, optionally with UTF-8 charset. Duplicate security-sensitive headers are refused before parsing commands or allocating streams.
 
-These checks apply to reads and event streams as well as mutations. The host enables no permissive CORS and sends no-store, nosniff, no-referrer, and restrictive content-security headers. A future browser application must use the same origin or an explicit development proxy. This is a browser-origin fence for a trusted local operator, not authentication between local users or protection against a malicious local process. Configured-secret masking and sensitive-repository acceptance remain deferred.
+These checks apply to static files, reads, and event streams as well as mutations. The host enables no permissive CORS and sends no-store, nosniff, no-referrer, and restrictive content-security headers. An API-only host denies all content sources; a configured browser build permits its own scripts, styles, connections, fonts, images, and data images while denying other origins, framing, base URLs, and cross-origin form targets. Development must use a same-origin proxy rather than permissive CORS. This is a browser-origin fence for a trusted local operator, not authentication between local users or protection against a malicious local process. Configured-secret masking and sensitive-repository acceptance remain deferred.
 
 ## Transport limits
 
@@ -64,6 +67,6 @@ The host reads one event per stream iteration and does not keep an application-l
 
 ## Verification
 
-Run `npm test -- packages/server/src/execution-http.test.ts packages/server/src/store.test.ts` with the [development prerequisites](development.md#setup-and-verification-procedure). Tests use actual loopback HTTP sockets, controlled providers, real SQLite, and approved shell fixtures. They cover lost acknowledgements and repeated commands, provider ownership after disconnect, approval and cancellation, exact event replay, reconnect precedence and boundary races, invalid/cross-session history cursors, duplicate delivery, actual socket backpressure, bounded subscribers, storage failure, and shutdown ordering. They also verify that reopening and retrying a terminal receipt does not repeat the tool effect.
+Run `npm test -- packages/server/src/execution-http.test.ts packages/server/src/store.test.ts` with the [development prerequisites](development.md#setup-and-verification-procedure). Tests use actual loopback HTTP sockets, controlled providers, real SQLite, and approved shell fixtures. They cover lost acknowledgements and repeated commands, provider ownership after disconnect, approval and cancellation, exact event replay, reconnect precedence and boundary races, invalid/cross-session history cursors, duplicate delivery, actual socket backpressure, bounded subscribers, storage failure, shutdown ordering, canonical static delivery, missing assets, unsupported types, and symbolic-link or traversal attempts. They also verify that reopening and retrying a terminal receipt does not repeat the tool effect. The [Chat verification](chat-controls.md#verification) owns the real-browser workflow.
 
-This evidence does not establish real-provider compatibility, product Chat/Trace interactions, authentication, secret masking, retention budgets, hostile-process confinement, or large-session performance. The [development guide](development.md#verification-and-completion) governs whole-change completion evidence.
+This transport evidence does not establish real-provider compatibility, Trace interactions, authentication, secret masking, retention budgets, hostile-process confinement, or large-session performance. The [development guide](development.md#verification-and-completion) governs whole-change completion evidence.
