@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the implemented browser Chat workflow, its event projection, mutation behavior, and current product limits. The [Trace inspector](trace-inspector.md) owns detailed execution presentation; the [HTTP service](http-service.md) owns routes and browser-origin enforcement; the [event contracts](execution-events.md) own lifecycle facts; the [product scope](product-scope.md) owns release requirements beyond these slices. The [service and Web Agent Note](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#chat-controls-phase) records the phase decision.
+This reference owns the implemented browser Chat workflow, its event projection, mutation behavior, and current product limits. The [Trace inspector](trace-inspector.md) owns detailed execution presentation; the [HTTP service](http-service.md) owns routes and browser-origin enforcement; the [event contracts](execution-events.md) own lifecycle facts; the [product scope](product-scope.md) owns release requirements. The [service and Web Agent Note](../.agents/notes/implemented/architecture/2026-08-27-execution-service-and-web.md#chat-controls-phase) records the phase decision.
 
 ## Available workflow
 
@@ -28,7 +28,7 @@ If a mutation has no trustworthy HTTP outcome, the browser reports that delivery
 
 Chat renders user and assistant text through React text nodes and renders tool arguments as formatted JSON. It loads no external visual resources. The interface uses one selected session and one SSE connection; the sidebar list is lexical saved-session discovery rather than recency ordering or user-authored titles.
 
-Chat does not expose complete model request context, reasoning, tool results, diffs, timings, token usage, or retained-payload flags; the separate [Trace view](trace-inspector.md) presents those browser-projected facts where implemented. Recovery blocker resolution, session deletion, export, complete release acceptance, and hostile local-process isolation remain unfinished. Configured-secret masking and retained-payload budgets apply in the service, not as Chat-side heuristics.
+Chat does not expose complete model request context, reasoning, tool results, diffs, timings, token usage, or retained-payload flags; the separate [Trace view](trace-inspector.md) presents those browser-projected facts where implemented. Recovery blocker resolution, session deletion, export, and hostile local-process isolation remain unavailable. Configured-secret masking and retained-payload budgets apply in the service, not as Chat-side heuristics.
 
 ## Verification
 

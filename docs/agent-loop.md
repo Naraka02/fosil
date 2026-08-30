@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the provider-neutral loop, request assembly, live run ownership, streaming, and execution limits. The [service proposal](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#controlled-provider-loop-phase) owns the phase decision and exclusions. [DeepSeek integration](deepseek-provider.md), [context compaction](context-compaction.md), [execution events](execution-events.md), [tool execution](tool-execution.md), and [startup recovery](recovery.md) own their lower-level contracts.
+This reference owns the provider-neutral loop, request assembly, live run ownership, streaming, and execution limits. The [implemented service decision](../.agents/notes/implemented/architecture/2026-08-27-execution-service-and-web.md#controlled-provider-loop-phase) owns the phase decision and exclusions. [DeepSeek integration](deepseek-provider.md), [context compaction](context-compaction.md), [execution events](execution-events.md), [tool execution](tool-execution.md), and [startup recovery](recovery.md) own their lower-level contracts.
 
 ## Service and ownership
 

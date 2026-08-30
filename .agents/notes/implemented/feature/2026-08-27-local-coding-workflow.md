@@ -1,14 +1,14 @@
 # Agent Note: Local coding workflow with inspectable execution
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
 fosil needs a bounded coding workflow before selecting a runtime or combining implementation ideas from existing agent systems. A chat transcript alone cannot establish what reached a model, which tools ran, or whether displayed history agrees with execution. Importing complete reference systems would also bring capabilities and maintenance obligations beyond the first release.
 
-## Proposal
+## Decision
 
-The maintainer approved the [first-release scope and acceptance requirements](../../../../docs/product-scope.md). This note remains proposed because the product is not implemented or verified. It owns the reference choices and rationale; the scope document owns the user-visible requirements. The [implemented Foundation note](../../implemented/architecture/2026-08-27-execution-foundations.md) owns the verified lower-level decisions and evidence; the [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md) owns the dependent contracts and remaining implementation slices.
+The [first-release scope and acceptance requirements](../../../../docs/product-scope.md) are effective and verified. This note owns the reference choices and rationale; the scope document owns the user-visible requirements. The [implemented Foundation note](../architecture/2026-08-27-execution-foundations.md) owns the lower-level decisions and evidence, and the [execution service and Web note](../architecture/2026-08-27-execution-service-and-web.md) owns the integrated runtime, browser, provider, and verification boundary.
 
 Use an independent execution core, a durable session event record, and separate Chat and Trace projections. Adopt responsibility boundaries and mechanisms rather than transplanting either reference system wholesale. The roles below are design constraints, not selected class names, a package layout, or a technology stack.
 
@@ -38,9 +38,9 @@ The public reference is DeepSeek Harness at revision `b150a551b8d465e31e418e1b2e
 | [Trajectory view](https://github.com/deepseek-ai/deepseek-harness/blob/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e/packages/client/ui-trajectory/README.md) | Independently project an execution ledger and inspector from the same session events as Chat | Do not infer execution from rendered chat messages or require advanced timeline interactions |
 | [Session telemetry](https://github.com/deepseek-ai/deepseek-harness/blob/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e/packages/session/session-telemetry/README.md) | Keep external reporting separate from local execution history | No exporter or telemetry service is required for the first release |
 
-### Decisions still required
+### Effective scope boundary
 
-The [execution service and Web proposal](../architecture/2026-08-27-execution-service-and-web.md#confirmation-and-remaining-decisions) records the verified controlled-provider loop and the remaining retention, reconnect, and service integration proposals for their implementation slices. The first real provider remains a separate choice before its integration slice. The remaining recommendations are not existing runtime capabilities or approved defaults.
+The [execution service and Web decision](../architecture/2026-08-27-execution-service-and-web.md#effective-boundary-and-exclusions) records the effective controlled-provider loop, retention, reconnect, browser, and DeepSeek integration. The first release intentionally retains one real provider family, fixed components, and a local single-user boundary. Broader recommendations from the references are not existing runtime capabilities or approved defaults.
 
 ## Alternatives considered
 
@@ -52,17 +52,9 @@ The [execution service and Web proposal](../architecture/2026-08-27-execution-se
 
 **Treat trace as raw IPC logs or external telemetry.** Protocol logs do not define the user-facing execution model, while external reporting introduces a separate data-sharing boundary. The approved scope calls for local execution inspection; transport diagnostics and exporters are not its foundation.
 
-**Include the broader agent feature set immediately.** Multi-agent execution, MCP, plugin distribution, scheduling, and remote deployment each introduce additional contracts. Skills, long-term memory, automatic compaction, and multiple providers remain deferred rather than implied by the reference implementations.
+**Include the broader agent feature set immediately.** Multi-agent execution, MCP, plugin distribution, scheduling, and remote deployment each introduce additional contracts. Skills, long-term memory, and multiple real provider families remain deferred rather than implied by the reference implementations. Automatic compaction is implemented only inside the selected DeepSeek provider boundary.
 
-## Acceptance criteria
-
-Implementation acceptance is defined solely by the [workflow and failure-path checks](../../../../docs/product-scope.md#acceptance-conditions), including the linked trace requirements. Recording this proposal or selecting a stack does not satisfy those checks. Move this note to implemented only after the workflow is effective and the required evidence has been reviewed under the [development guide](../../../../docs/development.md#verification-and-completion).
-
-### Verification sequence
-
-The [remaining implementation slices](../architecture/2026-08-27-execution-service-and-web.md#implementation-slices) define dependency order and observable evidence from the controlled-provider loop through real-provider acceptance. The [Foundation note](../../implemented/architecture/2026-08-27-execution-foundations.md#verification) records completed lower-level evidence, and the [development guide](../../../../docs/development.md#available-tooling) owns available commands. Passing foundation checks does not satisfy the complete product workflow; the scope document remains the owner of release acceptance.
-
-## Risks
+## Consequences
 
 An authoritative event record makes replay and inspection consistent but requires careful event evolution, chunk handling, and crash semantics. The first release does not promise automatic continuation of interrupted operations or lossless recovery of data that was never durably saved.
 
@@ -70,6 +62,14 @@ Detailed request and tool records can contain private source code or secrets emb
 
 Approval is not a sandbox. Local shell tools can affect the host, cancellation may leave partial changes, and automatic retries can duplicate side effects. These constraints must remain visible in the user experience and verification.
 
-Deferring compaction and advanced timeline rendering limits the initial context length and comfortable trace size. Deferring additional providers also means the adapter boundary has only one real implementation until later work tests it.
+Automatic compaction bounds model context inside the selected provider policy, while full-prefix browser reconstruction and the initial Trace presentation still limit comfortable large-session use. Deferring additional provider families means the adapter boundary has only one real implementation until later work tests another.
 
-The reference review was static source inspection, not runtime validation. No reference test results establish that fosil meets its requirements, and documentation checks for this proposal do not count as product acceptance.
+The reference review was static source inspection, not runtime validation. Fosil's controlled and live acceptance evidence establishes its own implemented boundary; reference-system test results do not.
+
+## Verification
+
+The [workflow and failure-path checks](../../../../docs/product-scope.md#acceptance-conditions), including the linked trace requirements, define acceptance. Controlled tests verify injected failure and safety paths, and the separately gated [first-release procedure](../../../../docs/release-acceptance.md) verifies the live browser, provider, coding repair, refresh, Trace, restart, and new-turn workflow.
+
+### Evidence boundary
+
+The [implemented slices](../architecture/2026-08-27-execution-service-and-web.md#implemented-slices) preserve the dependency order and cumulative evidence from the controlled-provider loop through real-provider acceptance. The [Foundation note](../architecture/2026-08-27-execution-foundations.md#verification) records lower-level evidence, the service note records integrated evidence, and the [development guide](../../../../docs/development.md#available-tooling) owns available commands. Neither static reference review nor a final model reply substitutes for the recorded test, tool, approval, diff, replay, and failure evidence.

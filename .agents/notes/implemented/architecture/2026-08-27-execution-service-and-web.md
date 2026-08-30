@@ -1,20 +1,20 @@
 # Agent Note: Execution service and Web integration
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
-The [implemented Execution Foundation](../../implemented/architecture/2026-08-27-execution-foundations.md) supplies durable state, command acceptance, recovery, and approved tool effects. The [approved coding workflow](../feature/2026-08-27-local-coding-workflow.md) requires explicit ownership of provider requests and run lifetimes, browser command and event delivery, and correlated Chat/Trace projections. Those responsibilities cannot be inferred from the controlled acceptance driver or a successful browser build.
+The [implemented Execution Foundation](2026-08-27-execution-foundations.md) supplies durable state, command acceptance, recovery, and approved tool effects. The [implemented coding workflow](../feature/2026-08-27-local-coding-workflow.md) requires explicit ownership of provider requests and run lifetimes, browser command and event delivery, and correlated Chat/Trace projections. Those responsibilities cannot be inferred from the controlled acceptance driver or a successful browser build.
 
-## Proposal
+## Decision
 
-This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop, local HTTP/SSE transport, Chat and Trace controls, DeepSeek adapter, context compaction, product launcher, release data-policy mechanisms, and live-provider integration are implemented through slice 10. Complete release acceptance remains unfinished, so the enclosing note remains proposed. Its filename retains the original proposal date; the split does not approve new scope, change technology choices, or restart completed Foundation work. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements. Foundation closeout does not implement this proposal.
+This note owns the service and browser portions extracted from the original execution-foundations proposal. The controlled-provider loop, local HTTP/SSE transport, Chat and Trace controls, DeepSeek adapter, context compaction, product launcher, release data-policy mechanisms, and live-provider integration are implemented through slice 10. Controlled failure-path coverage and the separately gated [first-release acceptance](../../../../docs/release-acceptance.md) verify the integrated boundary. Current lower-level contracts remain in their subsystem references, and the [product scope](../../../../docs/product-scope.md) owns release requirements.
 
 ### Composition and technology
 
 Extend the existing local backend host with an execution service and product HTTP server, serving a separately built browser application from the same origin. Run tasks belong to the service, not an HTTP request or browser connection. Retain the implemented core and tool boundaries; do not add a core daemon, broker, worker fleet, or plugin runtime.
 
-| Area | Proposed integration | Reason and remaining cost |
+| Area | Effective integration | Reason and remaining cost |
 | --- | --- | --- |
 | Execution service | TypeScript/Node on the Foundation runtime, with explicit run ownership and a provider adapter | Reuses the selected language and durable contracts; DeepSeek Responses translation and live-provider integration are verified |
 | HTTP | Fastify 5 with shared Zod 4 boundary validation | Keeps the framework outside the loop and avoids a second handwritten command schema; the existing acceptance viewer is not this service |
@@ -22,7 +22,7 @@ Extend the existing local backend host with an execution service and product HTT
 | Transport | JSON HTTP commands and reads; one SSE connection for the selected session | Commands do not need duplex transport; reconnect and slow-client handling remain application responsibilities |
 | Verification | Vitest for service/API/projections and Playwright for browser workflows | Controlled fixtures need no live provider; isolated report checks do not replace a committed product browser suite |
 
-The [Foundation decision](../../implemented/architecture/2026-08-27-execution-foundations.md#runtime-and-composition) owns the effective runtime, persistence, and package choices. [Fastify's TypeScript support](https://fastify.dev/docs/latest/Reference/TypeScript/) and [Playwright's documentation](https://playwright.dev/docs/intro) describe integration mechanisms, not completed project verification. The lockfile remains the dependency owner; no new versions are selected by this split.
+The [Foundation decision](2026-08-27-execution-foundations.md#runtime-and-composition) owns the effective runtime, persistence, and package choices. [Fastify's TypeScript support](https://fastify.dev/docs/latest/Reference/TypeScript/) and [Playwright's documentation](https://playwright.dev/docs/intro) describe integration mechanisms, not completed project verification. The lockfile remains the dependency owner; no new versions are selected by this split.
 
 ### Service ownership and provider boundary
 
@@ -48,7 +48,7 @@ The approved [limits](../../../../docs/agent-loop.md#limits) bound steps, provid
 
 #### Data and product exclusions
 
-The maintainer approved non-sensitive fixtures only for this checkpoint. Configured-secret masking, shared masking metadata, browser previews, and session retention budgets remain required before sensitive-repository use or real-provider acceptance. This sequencing does not remove the [release data requirements](../../../../docs/product-scope.md#data-boundary).
+The maintainer approved non-sensitive fixtures only for this checkpoint. Configured-secret masking, shared masking metadata, browser previews, and session retention budgets were deferred here and implemented before real-provider release acceptance. This sequencing preserved the [release data requirements](../../../../docs/product-scope.md#data-boundary).
 
 Product HTTP/SSE, Chat/Trace controls, live steering, within-step tool parallelism, real-provider selection, memory, skills, delegation, MCP, dynamic plugins, post-crash process cleanup, and blocker resolution remain outside slice 6. Internal expiry scheduling belongs to execution lifecycle, not a scheduled-task product. Approval races reread the saved decision before settling an undispatched call; they never authorize retry of an effect with a saved start.
 
@@ -58,7 +58,7 @@ Slice 7 exposes existing commands and saved session/history reads through a loop
 
 Session listing uses bounded lexical identity paging rather than introducing titles or a second conversation model. History preserves the existing fixed-prefix cursor. SSE reads successive committed prefixes with one event in flight per connection; polling avoids a read/subscribe race without adding a broker or notification queue. Decimal sequence identifiers support reconnect, with Last-Event-ID taking precedence over the initial cursor; the session URL and sequence form its identity. History passes the complete shared cursor, including its session identity, rather than reconstructing it from unbound sequence values. Slow or oversized streams disconnect rather than buffering an unbounded backlog. Exact Host and Origin checks and restrictive Fetch Metadata handling apply before command parsing and stream allocation. The construction interface owns transport limits; these are bounded local defaults, not performance or retention guarantees.
 
-Verification uses controlled providers, real HTTP sockets and SQLite, including lost response receipts, disconnect during execution, stale/invalid cursors, replay and reconnect races, duplicate delivery, slow readers, shutdown, and rejected browser origins. It introduces neither product UI nor a real-provider CLI; sensitive-data, retention, masking and remaining product obligations stay deferred. The enclosing note remains proposed until its remaining slices are effective.
+Verification uses controlled providers, real HTTP sockets and SQLite, including lost response receipts, disconnect during execution, stale/invalid cursors, replay and reconnect races, duplicate delivery, slow readers, shutdown, and rejected browser origins. At this slice boundary it introduced neither product UI nor a real-provider CLI; the dependent slices added those capabilities.
 
 ### Chat controls phase
 
@@ -76,7 +76,7 @@ Slice 9 adds a separate Trace view over the exact selected-session event prefix 
 
 The ledger uses the final request or tool settlement as each record's primary status while retaining committed stream-fragment counts and content as explicitly labelled subordinate evidence. Request snapshots, outputs, errors, stop reasons, tool arguments and results, approval decisions, timings, usage, exit codes, and evidence remain attached to their recorded identities. Null measurements render as unknown rather than zero. File-change evidence exposes its saved diff; generic evidence stays JSON data and is not promoted into an attributed change claim.
 
-Payload flags are discovered only from explicit retained fields whose names identify truncation, masking, omission, invalid encoding, or incompleteness. Both true and false values remain visible when present; absence of such a field does not become a claim that the payload is complete or secret-free. Configured-secret masking and retention metadata remain unfinished product requirements rather than UI inference.
+Payload flags are discovered only from explicit retained fields whose names identify truncation, masking, omission, invalid encoding, or incompleteness. Both true and false values remain visible when present; absence of such a field does not become a claim that the payload is complete or secret-free. Configured-secret masking and retention metadata are producer-owned facts rather than UI inference.
 
 The initial interaction uses collapsible run and step groups, record selection, and an errors-only filter. Rebuilding after refresh must produce the same record identities, statuses, details, metrics, flags, and evidence without another command or provider call. Browser verification compares an inspectable request, unknown metrics, approval and tool settlement, and reopened facts against the same canonical history.
 
@@ -110,7 +110,7 @@ The [fixed-prefix history API](../../../../docs/event-store.md#fixed-prefix-hist
 
 Use the decimal seq as SSE id. The [EventSource specification](https://html.spec.whatwg.org/multipage/server-sent-events.html#the-last-event-id-header) defines Last-Event-ID on reconnect. On a new stream use an explicit after cursor; on native reconnect the validated Last-Event-ID takes precedence. Bound every cursor to its requested session and reject malformed or future values. Delivery may repeat records, so the client deduplicates by session/seq and requires contiguous application. A detected gap or reducer error closes the stream and rebuilds from history rather than skipping ahead. Slow clients are disconnected and replay from storage instead of growing an unbounded memory queue.
 
-Reuse the [implemented recovery and workspace blockers](../../../../docs/recovery.md). Replay does not resume tools or establish that a residual process stopped. Post-crash cleanup and an explicit blocker-resolution mechanism remain unfinished: verify cleanup or record an explicit user resolution before clearing uncertainty, and never signal a stale PID without validating its identity. Automatic continuation, rollback, and general side-effect retries remain excluded.
+Reuse the [implemented recovery and workspace blockers](../../../../docs/recovery.md). Replay does not resume tools or establish that a residual process stopped. Post-crash cleanup and an explicit blocker-resolution mechanism are not implemented: verify cleanup or record an explicit user resolution before clearing uncertainty, and never signal a stale PID without validating its identity. Automatic continuation, rollback, and general side-effect retries remain excluded.
 
 ### Local browser trust and trace retention
 
@@ -120,17 +120,17 @@ Retain the [file](../../../../docs/file-tools.md) and [shell](../../../../docs/s
 
 Keep credentials in provider configuration outside event payloads. Apply the configured exact-value masker described by the DeepSeek phase before admitting durable content and before reusing tool output as model history; attach shared field metadata whenever content is masked, truncated, or omitted. Do not store authentication headers, raw transport frames, or arbitrary exception objects. Missing required request or response context cannot silently become an exact snapshot. No automatic detection of unconfigured secrets embedded in source code is promised.
 
-The store already commits private payload references and complete bodies together; slice 10 adds the confirmed masking metadata and logical session budget without changing immutable-event ownership. The [loop limits](../../../../docs/agent-loop.md#limits) own request and provider-output limits. A capped tool result is also capped in model-visible history and explicitly marked; a 64 KiB browser preview is not the full retained payload. Oversized model request snapshots trigger local compaction before dispatch and fail explicitly when they still cannot fit; Trace never presents a silent truncation as exact input. The 240 MiB normal budget and 16 MiB terminal reserve are logical retained-payload limits rather than filesystem quotas, so disk exhaustion still follows the storage-failure contract. Saved sessions have no automatic age-based deletion in the first release, and this proposal adds no deletion/export UI.
+The store commits private payload references and complete bodies together; slice 10 adds masking metadata and a logical session budget without changing immutable-event ownership. The [loop limits](../../../../docs/agent-loop.md#limits) own request and provider-output limits. A capped tool result is also capped in model-visible history and explicitly marked; a 64 KiB browser preview is not the full retained payload. Oversized model request snapshots trigger local compaction before dispatch and fail explicitly when they still cannot fit; Trace never presents a silent truncation as exact input. The 240 MiB normal budget and 16 MiB terminal reserve are logical retained-payload limits rather than filesystem quotas, so disk exhaustion still follows the storage-failure contract. Saved sessions have no automatic age-based deletion in the first release, and the product has no deletion/export UI.
 
 The [loop limits](../../../../docs/agent-loop.md#limits) own step and provider-deadline choices; the [shell contract](../../../../docs/shell-tools.md#invocation-boundary) owns its implemented deadline and cleanup window. The DeepSeek phase owns its model-specific context capacity, output reserve, estimator, and automatic compaction policy. Those values do not become guessed defaults for another provider.
 
-### Confirmation and remaining decisions
+### Effective boundary and exclusions
 
-The Foundation choices and bounded concurrency evidence are effective and owned by the [implemented note](../../implemented/architecture/2026-08-27-execution-foundations.md). The maintainer confirmed the DeepSeek model routing, Responses transport, context and compaction limits, single context-recovery attempt, configured-secret masking, sanitized provider evidence, and retained-payload budgets described above. Those mechanisms have controlled verification, and live provider use is accepted for both configured models plus a Flash coding repair through the product service. Shell-wide attribution, post-crash cleanup, blocker resolution, and complete release acceptance remain unfinished; credentials stay out of repository documents and conversation output.
+The Foundation choices and bounded concurrency evidence are effective and owned by the [implemented note](2026-08-27-execution-foundations.md). The DeepSeek model routing, Responses transport, context and compaction limits, single context-recovery attempt, configured-secret masking, sanitized provider evidence, and retained-payload budgets described above have controlled verification. Live provider use is accepted for both configured models, and the Flash browser workflow has passed the complete first-release procedure. Shell-wide attribution, post-crash cleanup, blocker resolution, session deletion/export, hostile local-process isolation, and large-session performance guarantees remain outside the implemented boundary; credentials stay out of repository documents and conversation output.
 
 The controlled-provider Web implementation makes no multi-conversation concurrency acceptance claim. The [Foundation concurrency contract](../../../../docs/tool-execution.md#cross-workspace-concurrency) remains the lower-level boundary, with no automatic scheduler, same-workspace writer guarantee, or shared-host fault isolation.
 
-The [controlled-provider phase](#controlled-provider-loop-phase) records the approved slice-6 scope and deferrals. Its [verification](#controlled-provider-verification) satisfies the bounded loop checkpoint; the implemented Web, DeepSeek/data-policy, and live-provider mechanisms have separate evidence, while complete release acceptance still requires verification.
+The [controlled-provider phase](#controlled-provider-loop-phase) records the slice-6 scope and deferrals. Its [verification](#controlled-provider-verification) satisfies the bounded loop checkpoint; the Web, DeepSeek/data-policy, and [first-release verification](#first-release-verification) sections retain their separate evidence.
 
 ## Alternatives considered
 
@@ -140,19 +140,27 @@ The [controlled-provider phase](#controlled-provider-loop-phase) records the app
 
 **Treat the loop as mutable chat history plus event logging.** A logger that fails independently of execution cannot enforce the dispatch checkpoints or reconstruct a failed request reliably. The implemented loop derives context from committed events and awaits required writes before progression, while retaining separate pure context assembly and effect ownership.
 
-**Adopt reference-runtime extension mechanisms with the loop.** DSH's steering inbox, parallel tool pool, configurable recovery chain, and plugin ownership solve broader composition requirements. This checkpoint retains fixed components, sequential within-run execution, and explicit limits; the [workflow proposal](../feature/2026-08-27-local-coding-workflow.md#alternatives-considered) owns the decision not to transplant a general plugin platform. KamaClaude's general tool-runtime retries are also excluded because an error does not prove absence of a prior side effect.
+**Adopt reference-runtime extension mechanisms with the loop.** DSH's steering inbox, parallel tool pool, configurable recovery chain, and plugin ownership solve broader composition requirements. This checkpoint retains fixed components, sequential within-run execution, and explicit limits; the [workflow decision](../feature/2026-08-27-local-coding-workflow.md#alternatives-considered) owns the decision not to transplant a general plugin platform. KamaClaude's general tool-runtime retries are also excluded because an error does not prove absence of a prior side effect.
 
 **Complete production retention and masking before testing any loop.** Those requirements span every content producer and retained evidence, beyond adding model orchestration. Controlled non-sensitive fixtures allow the loop's behavior to be verified independently, at the cost of explicitly withholding sensitive-data and real-provider acceptance until the deferred work is effective. The maintainer approved this sequencing for the controlled-provider phase.
 
-The [Foundation alternatives](../../implemented/architecture/2026-08-27-execution-foundations.md#alternatives-considered) retain the runtime, storage, process-boundary, permission, concurrency, and controlled-report decisions. The [workflow alternatives](../feature/2026-08-27-local-coding-workflow.md#alternatives-considered) retain the reference-adoption and product-scope trade-offs. They are dependencies of this proposal rather than duplicated decisions.
+The [Foundation alternatives](2026-08-27-execution-foundations.md#alternatives-considered) retain the runtime, storage, process-boundary, permission, concurrency, and controlled-report decisions. The [workflow alternatives](../feature/2026-08-27-local-coding-workflow.md#alternatives-considered) retain the reference-adoption and product-scope trade-offs. They are dependencies of this decision rather than duplicated decisions.
 
-## Acceptance criteria
+## Consequences
 
-The [product release conditions](../../../../docs/product-scope.md#acceptance-conditions) remain the end-to-end authority. The following dependent slices require implementation and evidence; approval of this note and passing Foundation checks do not satisfy them. Move this note to implemented only after its scope is effective and verified.
+Committed streaming trades latency and disk traffic for faithful reopening. Full-prefix reconstruction, committed chunks, and bounded payloads target small initial fixtures; they do not establish large-session performance. The selected defaults are operational bounds rather than throughput guarantees. Reserve terminal-record capacity when adding retention budgets.
 
-### Controlled-provider loop acceptance
+Shared-host service ownership must survive request disconnect without concealing the host and store failure domain. Cooperative cancellation, residual processes, and uncertain effects can require explicit user recovery. The [Foundation limitations](2026-08-27-execution-foundations.md#consequences) remain in force; browser controls do not strengthen operating-system confinement or native Windows support.
 
-The following obligations define the slice-6 acceptance boundary. The [verification evidence](#controlled-provider-verification) covers the effective controlled-provider implementation; the remaining implementation slices are not implied by that result.
+Configured-secret masking can change retained context and must remain observable; it cannot guarantee removal of unknown secrets. Shell comparisons can confuse user edits with tool effects unless their baseline and uncertainty remain visible. A provider-neutral event vocabulary and a single real adapter do not prove compatibility with other providers.
+
+## Verification
+
+The [product release conditions](../../../../docs/product-scope.md#acceptance-conditions) remain the end-to-end authority. Verification is cumulative: deterministic checks own injected failures and safety races, while the separately gated live workflow owns real-provider and browser evidence.
+
+### Controlled-provider loop boundary
+
+The following obligations define the slice-6 boundary. The [verification evidence](#controlled-provider-verification) covers the effective controlled-provider implementation without standing in for later browser or provider evidence.
 
 | Increment | Observable evidence |
 | --- | --- |
@@ -187,7 +195,7 @@ Projection tests verify final model output replaces accumulated deltas, only unr
 
 The committed browser workflow observes durable streaming before the provider finishes, refreshes with an approval pending without another model request or effect, allows one Shell marker exactly once, reopens without reviving that approval, denies another marker with no effect, reopens without approval controls, cancels and cleans a waiting provider, and reopens the cancelled run without another request. It also checks a 390-pixel viewport without horizontal overflow and observes no external resource request. Separate desktop and mobile screenshots were reviewed locally for hierarchy, density, status visibility, and responsive reading order; those temporary images are review aids, not retained acceptance artifacts.
 
-This evidence establishes the bounded [Chat contract](../../../../docs/chat-controls.md), not Trace, real-provider behavior, a product launcher, masking, retention budgets, byte-bounded history responses, sensitive-repository use, or large-session performance. The enclosing note remains proposed and the earlier checkpoint tags remain fixed.
+This evidence establishes the bounded [Chat contract](../../../../docs/chat-controls.md), not Trace, real-provider behavior, a product launcher, masking, retention budgets, byte-bounded history responses, sensitive-repository use, or large-session performance. The later slices supply their own evidence, and the earlier checkpoint tags remain fixed.
 
 ### Trace inspector verification
 
@@ -197,7 +205,7 @@ The pure Trace projection tests correlate model requests, tool calls, and approv
 
 The committed Chromium workflow drives a controlled provider through an approved managed file edit, then inspects the exact saved request, call, approval, arguments, result, diff, unknown usage, and payload flags. Error filtering, grouped folding, identical Trace text after refresh, unchanged POST and provider-call counts, absence of another tool effect, a 390-pixel viewport without horizontal overflow, and absence of external requests passed. Separate desktop and mobile screenshots were reviewed locally for grouping, detail hierarchy, density, status visibility, and reading order; those temporary images are review aids, not retained acceptance artifacts.
 
-This evidence establishes the bounded [Trace contract](../../../../docs/trace-inspector.md), not configured-secret masking, shared retention metadata or budgets, shell-wide change attribution, real-provider behavior, a product launcher, sensitive-repository use, large-session performance, or complete release acceptance. The enclosing note remains proposed and the earlier checkpoint tags remain fixed.
+This evidence establishes the bounded [Trace contract](../../../../docs/trace-inspector.md), not configured-secret masking, shared retention metadata or budgets, shell-wide change attribution, real-provider behavior, a product launcher, sensitive-repository use, or large-session performance. The later slices supply their own evidence, and the earlier checkpoint tags remain fixed.
 
 ### DeepSeek, compaction, and data-policy verification
 
@@ -207,11 +215,21 @@ Injected DeepSeek tests verify stateless Responses serialization, replay of expo
 
 Package and documentation review found no new runtime dependency or database `user_version`; the version-1 payload reader remains compatible with earlier unwrapped payloads. Newly created database permissions, launcher argument rejection, key-only environment configuration, and no-credential `--help` behavior are covered by code or tests. Changed-document links and fragments, documentation form, English-only prose, tracked whitespace, and untracked files were reviewed.
 
-Product-loop verification used Node.js 24.20.0, the official TLS endpoint, and environment-only credentials. Flash and Pro each completed a minimal streamed adapter request and a product-launcher `read_file` loop with matching model metadata, non-null usage, durable Responses metadata, exact final content, and no configured credential in the saved event projection. The Linux-path launcher run created its database with mode `0600`. A separate Flash coding run completed five successful model requests, two file reads, three allowed approvals, one managed edit, a baseline test exit of 1, a verification exit of 0, and an independently confirmed passing test. The live run generated 293 saved browser-projected events, which also exercised complete fixed-prefix pagination in the acceptance client. Live context-overflow and provider-failure paths, browser refresh and restart during a real-model run, pre-existing user-change preservation, and complete release acceptance remain unverified, so this note remains proposed.
+Product-loop verification used Node.js 24.20.0, the official TLS endpoint, and environment-only credentials. Flash and Pro each completed a minimal streamed adapter request and a product-launcher `read_file` loop with matching model metadata, non-null usage, durable Responses metadata, exact final content, and no configured credential in the saved event projection. The Linux-path launcher run created its database with mode `0600`. An initial Flash coding probe completed five successful model requests, two file reads, three allowed approvals, one managed edit, a baseline test exit of 1, a verification exit of 0, and an independently confirmed passing test. It generated 293 saved browser-projected events and exercised complete fixed-prefix pagination.
 
-### Implementation slices
+### First-release verification
 
-The original slice numbers are retained for continuity; completed slices 1 through 5c are covered by the [Foundation closeout](../../implemented/architecture/2026-08-27-execution-foundations.md#foundation-phase-closeout) and are no longer an active implementation plan.
+The formal `release-live-deepseek` run used Node.js 24.20.0, environment-only credentials, TLS verification, the production product launcher, Chromium, real DeepSeek Flash requests, an isolated Git fixture, and the same SQLite database across a service restart. Its retained report passed 10 checks over 614 canonical events, seven model requests, and exactly three allowed approvals: two invocations of the specified test and one exact managed repair. It observed successful reads of both relevant files, a baseline test exit of 1, the exact `sum.cjs` edit, verification and independent test exits of 0, an unchanged pre-existing user diff, matching credential-free Responses metadata, database mode `0600`, and no configured credential in final canonical or browser-projected events.
+
+The browser was refreshed while the first approval was pending before its effect, and the original approval remained actionable exactly once. After completion, Chat and Trace reconstructed the saved prefix without another command or model request, the settled approval remained inert, and the Trace screenshot retained correlated model, approval, tool, output, and diff evidence. Restarting the service over the same database produced an identical completed prefix and allowed a new real-model turn. The generated local report loads no external resources or execution endpoints and retains no credential.
+
+The final Node.js 24 regression suite passed 303 tests in 21 files without live provider calls. It deterministically covers the exact live-approval policy, approval denial, tool and model failures, timeouts, cancellation and cleanup, persistence failures, interrupted-run recovery, context overflow and recovery, browser replay, unknown measurements, masking, truncation, storage budgets, and real nonreading-socket backpressure. The standalone SQLite probe, product help, dependency-tree check, dependency audit, documentation links and fragments, package boundaries, and whitespace checks form the remaining checkpoint evidence. The [acceptance procedure](../../../../docs/release-acceptance.md) owns reproduction and artifact details.
+
+The fixed local annotated tag `first-release` identifies this reviewed boundary without moving the earlier Foundation or controlled-provider Agent Loop tags.
+
+### Implemented slices
+
+The original slice numbers are retained for continuity; completed slices 1 through 5c are covered by the [Foundation closeout](2026-08-27-execution-foundations.md#foundation-phase-closeout).
 
 | Slice | Dependency | Bounded deliverable and verification |
 | --- | --- | --- |
@@ -219,14 +237,6 @@ The original slice numbers are retained for continuity; completed slices 1 throu
 | 7. HTTP and SSE | Foundation and 6 | Implemented and checked by the [HTTP/SSE verification](#http-and-sse-verification), with controlled providers and no product browser UI |
 | 8. Chat controls | 7 | Implemented and checked by the [Chat controls verification](#chat-controls-verification), including real-browser refresh, approval, effect, denial, cancellation, and narrow-viewport behavior |
 | 9. Trace inspector | 8 | Implemented and checked by the [Trace inspector verification](#trace-inspector-verification), including grouped correlation, measurements, payload flags, saved diff evidence, filtering, and identical reopened facts |
-| 10. DeepSeek adapter, context, and data policy | 6-9 plus provider selection | Adapter, launcher, compaction, masking, browser previews, retained-payload budgets, both model routes, and a live Flash bug-fix are verified; live failure paths and complete release acceptance remain required |
+| 10. DeepSeek adapter, context, and data policy | 6-9 plus provider selection | Implemented and checked by injected provider/data-policy tests, both model routes, and the [first-release verification](#first-release-verification) |
 
-Review evidence at each slice before starting dependent behavior. The controlled-provider loop and injected DeepSeek streams remain deterministic test boundaries separate from the recorded live-provider evidence. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns commands that exist; additional billable live-provider and release workflow tests require explicit execution and retained evidence.
-
-## Risks
-
-Committed streaming trades latency and disk traffic for faithful reopening. Full-prefix reconstruction, committed chunks, and bounded payloads target small initial fixtures; they do not establish large-session performance. The selected defaults are operational bounds rather than throughput guarantees. Reserve terminal-record capacity when adding retention budgets.
-
-Shared-host service ownership must survive request disconnect without concealing the host and store failure domain. Cooperative cancellation, residual processes, and uncertain effects can require explicit user recovery. The [Foundation limitations](../../implemented/architecture/2026-08-27-execution-foundations.md#consequences) remain in force; browser controls do not strengthen operating-system confinement or native Windows support.
-
-Configured-secret masking can change retained context and must remain observable; it cannot guarantee removal of unknown secrets. Shell comparisons can confuse user edits with tool effects unless their baseline and uncertainty remain visible. A provider-neutral event vocabulary and a single real adapter do not prove compatibility with other providers.
+The controlled-provider loop and injected DeepSeek streams remain deterministic test boundaries separate from recorded live-provider evidence. The [development guide](../../../../docs/development.md#setup-and-verification-procedure) owns ordinary checks, and the [first-release acceptance procedure](../../../../docs/release-acceptance.md) owns the explicit billable workflow and retained evidence.

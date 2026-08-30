@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This document owns the approved first-release audience, workflow, exclusions, trace requirements, and acceptance conditions. These are requirements, not claims of available software. The [workflow proposal](../.agents/notes/proposed/feature/2026-08-27-local-coding-workflow.md) owns the reference implementation choices and rationale, and links to the proposed execution contracts and implementation sequence. The [development guide](development.md#available-tooling) owns the available tooling facts.
+This document owns the approved first-release audience, workflow, exclusions, trace requirements, and acceptance conditions. The [implemented workflow decision](../.agents/notes/implemented/feature/2026-08-27-local-coding-workflow.md) owns the reference choices and rationale, while the [first-release acceptance procedure](release-acceptance.md) owns reproducible live evidence. The [development guide](development.md#available-tooling) owns the available tooling facts.
 
 ## Audience and setting
 
@@ -60,7 +60,7 @@ Payload retention, size limits, and content masking follow the [store policy](ev
 
 ## Acceptance conditions
 
-These conditions are release requirements. No test command, fixture, or passing result is implied by this document. The implementation must provide reproducible evidence for the scenarios below.
+These conditions are release requirements. The [first-release acceptance procedure](release-acceptance.md) owns the billable live workflow and retained evidence; deterministic tests own injected failure and safety paths.
 
 ### Coding task
 

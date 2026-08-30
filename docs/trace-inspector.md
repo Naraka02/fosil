@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the implemented browser Trace projection, record presentation, filtering, and current limits. The [Chat controls](chat-controls.md) own session loading, canonical event admission, SSE reconciliation, and mutations; the [event contracts](execution-events.md) own lifecycle facts; the [product scope](product-scope.md#trace-requirements) owns release requirements beyond this slice. The [service and Web Agent Note](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#trace-inspector-phase) records the phase decision.
+This reference owns the implemented browser Trace projection, record presentation, filtering, and current limits. The [Chat controls](chat-controls.md) own session loading, canonical event admission, SSE reconciliation, and mutations; the [event contracts](execution-events.md) own lifecycle facts; the [product scope](product-scope.md#trace-requirements) owns release requirements. The [service and Web Agent Note](../.agents/notes/implemented/architecture/2026-08-27-execution-service-and-web.md#trace-inspector-phase) records the phase decision.
 
 ## Projection and correlation
 
@@ -22,7 +22,7 @@ Saved `file_change` evidence receives a dedicated diff panel. Other evidence rem
 
 Trace surfaces explicit retained fields whose names identify truncation, masking, omission, invalid encoding, or incompleteness. A recorded `false` remains visible. Absence of a matching field means only that no explicit flag was retained; it does not prove completeness or absence of sensitive content.
 
-The application still loads a complete selected-session prefix of bounded browser projections into memory and has no session deletion, export, recovery-blocker resolution, payload search, virtualization, or large-session performance guarantee. Configured-secret masking, shared content metadata, retained-payload budgets, and the product launcher are implemented at their owning service boundaries. Shell-wide change attribution and complete release acceptance remain unfinished.
+The application still loads a complete selected-session prefix of bounded browser projections into memory and has no session deletion, export, recovery-blocker resolution, payload search, virtualization, or large-session performance guarantee. Configured-secret masking, shared content metadata, retained-payload budgets, and the product launcher are implemented at their owning service boundaries. Arbitrary shell changes remain unknown evidence rather than automatically attributed diffs.
 
 ## Verification
 

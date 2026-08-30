@@ -2,7 +2,7 @@
 
 Document type: reference.
 
-This reference owns the local HTTP command/read boundary, static application delivery, SSE delivery, browser projections, origin checks, and transport lifecycle. The [service Agent Note](../.agents/notes/proposed/architecture/2026-08-27-execution-service-and-web.md#http-and-sse-phase) records the transport decision. The [event store](event-store.md) owns durable receipts and canonical history; the [agent loop](agent-loop.md) owns execution and provider cleanup; the [Chat reference](chat-controls.md) owns browser behavior.
+This reference owns the local HTTP command/read boundary, static application delivery, SSE delivery, browser projections, origin checks, and transport lifecycle. The [service Agent Note](../.agents/notes/implemented/architecture/2026-08-27-execution-service-and-web.md#http-and-sse-phase) records the transport decision. The [event store](event-store.md) owns durable receipts and canonical history; the [agent loop](agent-loop.md) owns execution and provider cleanup; the [Chat reference](chat-controls.md) owns browser behavior.
 
 ## Construction and ownership
 

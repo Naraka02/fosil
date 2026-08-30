@@ -41,6 +41,7 @@ it("renders hostile retained text as text and exposes failed acceptance honestly
   expect(html).toContain("&lt;img");
   expect(html).not.toContain("<img");
   expect(html.match(/<script>/g)).toHaveLength(1);
+  expect(html).toContain("Opening this report loads no external resources or execution endpoints");
 });
 
 it("serves only the immutable report with a read-only loopback origin boundary", async () => {

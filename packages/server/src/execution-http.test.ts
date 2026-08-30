@@ -408,8 +408,13 @@ describe("durable event SSE", () => {
     await new Promise<void>((resolve) => socket.once("connect", resolve)); socket.pause();
     socket.write(`GET /api/sessions/${session_id}/events?after=1 HTTP/1.1\r\nHost: ${address.host}\r\n\r\n`);
     await until(() => f.store.pageReads >= 3);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const stoppedAt = f.store.pageReads;
+    let stoppedAt = 0;
+    await until(async () => {
+      const before = f.store.pageReads;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      stoppedAt = f.store.pageReads;
+      return stoppedAt === before;
+    });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(f.store.pageReads).toBe(stoppedAt);
     expect(stoppedAt).toBeLessThan((await f.store.getSession(session_id))!.last_seq);

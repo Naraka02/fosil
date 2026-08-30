@@ -25,6 +25,8 @@
     "acceptance:foundation": "node packages/server/dist/foundation-cli.js",
     "preacceptance:loop": "tsc -b --pretty false",
     "acceptance:loop": "node packages/server/dist/loop-cli.js",
+    "preacceptance:release": "npm run build",
+    "acceptance:release": "node packages/server/dist/release-cli.js",
     "preacceptance:serve": "tsc -b --pretty false",
     "acceptance:serve": "node packages/server/dist/foundation-viewer-cli.js"
   },

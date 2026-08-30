@@ -17,6 +17,7 @@ This page routes readers to the owner of a topic. It is not a progress tracker o
 | Understand automatic context projection and recovery | [Context compaction](context-compaction.md) |
 | Integrate local commands, history reads and event streams | [Execution HTTP service](http-service.md) |
 | Understand the product browser workflow | [Chat controls](chat-controls.md), then [Trace inspector](trace-inspector.md) |
+| Reproduce the complete live product workflow | [First-release acceptance](release-acceptance.md) |
 | Understand event validation and state transitions | [Execution events and state reduction](execution-events.md) |
 | Understand durable command acceptance and storage | [Event store and command acceptance](event-store.md) |
 | Understand restart and model-history construction | [Startup recovery and model history](recovery.md) |
