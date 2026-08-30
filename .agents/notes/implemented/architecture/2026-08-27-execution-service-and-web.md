@@ -225,6 +225,8 @@ The browser was refreshed while the first approval was pending before its effect
 
 The final Node.js 24 regression suite passed 303 tests in 21 files without live provider calls. It deterministically covers the exact live-approval policy, approval denial, tool and model failures, timeouts, cancellation and cleanup, persistence failures, interrupted-run recovery, context overflow and recovery, browser replay, unknown measurements, masking, truncation, storage budgets, and real nonreading-socket backpressure. The standalone SQLite probe, product help, dependency-tree check, dependency audit, documentation links and fragments, package boundaries, and whitespace checks form the remaining checkpoint evidence. The [acceptance procedure](../../../../docs/release-acceptance.md) owns reproduction and artifact details.
 
+The acceptance driver propagates SIGINT and SIGTERM through product startup and active execution, requests product and Chromium cleanup, and treats cleanup failure as a failed report. This post-checkpoint harness hardening does not move the fixed `first-release` tag.
+
 The fixed local annotated tag `first-release` identifies this reviewed boundary without moving the earlier Foundation or controlled-provider Agent Loop tags.
 
 ### Implemented slices

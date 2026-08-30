@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,7 +36,8 @@ async function waitUntil<T>(read: () => T | Promise<T>, accept: (value: T) => bo
   }
 }
 
-async function startProduct(database: string, environment = process.env): Promise<ProductProcess> {
+async function startProduct(database: string, signal: AbortSignal, environment = process.env): Promise<ProductProcess> {
+  signal.throwIfAborted();
   const child = spawn(process.execPath, [productCli, "--database", database, "--port", "0", "--model", model], {
     cwd: repository, env: environment, stdio: ["ignore", "pipe", "pipe"]
   });
@@ -45,9 +46,11 @@ async function startProduct(database: string, environment = process.env): Promis
   child.stderr.setEncoding("utf8").on("data", (part: string) => { stderr += part; });
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   let stopping: Promise<void> | undefined;
+  const onAbort = () => { void stop().catch(() => undefined); };
   const stop = () => {
     if (stopping) return stopping;
     stopping = (async () => {
+      signal.removeEventListener("abort", onAbort);
       if (child.exitCode === null) child.kill("SIGTERM");
       await Promise.race([exited, pause(10_000)]);
       if (child.exitCode === null) {
@@ -60,6 +63,8 @@ async function startProduct(database: string, environment = process.env): Promis
     })();
     return stopping;
   };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
   try {
     const origin = await waitUntil(
       () => {
@@ -72,6 +77,7 @@ async function startProduct(database: string, environment = process.env): Promis
       "the product launcher"
     );
     if (origin === null) throw new Error("Product launcher did not report its origin");
+    signal.throwIfAborted();
     return { origin, stop };
   } catch (error) {
     await stop().catch(() => undefined);
@@ -225,10 +231,16 @@ let observations: Record<string, unknown> = { preexisting_user_diff: preexisting
 const checks: string[] = [];
 let failure: string | null = null;
 const acceptanceControl = new AbortController();
+let browserClosing: Promise<void> | undefined;
+const closeBrowser = () => {
+  if (browser === undefined) return Promise.resolve();
+  browserClosing ??= browser.close();
+  return browserClosing;
+};
 const interrupt = (signal: NodeJS.Signals) => {
   failure ??= `Release acceptance interrupted by ${signal}`;
   acceptanceControl.abort();
-  void browser?.close().catch(() => undefined);
+  void closeBrowser().catch(() => undefined);
   void product?.stop().catch(() => undefined);
 };
 process.once("SIGINT", interrupt);
@@ -236,8 +248,10 @@ process.once("SIGTERM", interrupt);
 try {
   if (baseline.status !== 1) throw new Error(`Fixture baseline must fail with exit 1, received ${baseline.status}`);
   checks.push("Independent fixture baseline failed with exit 1 before the agent run.");
-  product = await startProduct(database);
+  product = await startProduct(database, acceptanceControl.signal);
+  acceptanceControl.signal.throwIfAborted();
   browser = await chromium.launch({ headless: true });
+  acceptanceControl.signal.throwIfAborted();
   const page = await browser.newPage({ viewport: { width: 1360, height: 900 } });
   const external: string[] = [];
   const browserOrigins = new Set([product.origin]);
@@ -252,6 +266,7 @@ try {
   await page.getByRole("heading", { name: basename(workspace) }).waitFor();
   sessionId = await sessionIdentity(product.origin);
   await page.getByLabel("Message").fill("Fix the defect in sum.cjs so `node --test sum.test.cjs` passes. Use read_file to inspect sum.cjs and sum.test.cjs. Run exactly `node --test sum.test.cjs` before editing, replace only sum.cjs with exactly `module.exports = (a, b) => a + b;`, rerun exactly the same test once, preserve user-notes.txt and every pre-existing user change, do not use git or any other shell command, and report the verified result.");
+  acceptanceControl.signal.throwIfAborted();
   await page.getByRole("button", { name: "Send" }).click();
   const driven = await driveApprovals(page, product.origin, sessionId, workspace, sourcePath, acceptanceControl.signal, () => posts);
   if (!driven.refreshedPending) throw new Error("The live run produced no pending approval to reconstruct across refresh");
@@ -339,7 +354,8 @@ try {
   if ((await stat(database)).mode % 0o1000 !== 0o600) throw new Error("The new database is not mode 0600");
   checks.push("The Linux SQLite database was created with mode 0600.");
 
-  product = await startProduct(database);
+  product = await startProduct(database, acceptanceControl.signal);
+  acceptanceControl.signal.throwIfAborted();
   browserOrigins.add(product.origin);
   await page.goto(product.origin, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: basename(workspace) }).waitFor();
@@ -353,6 +369,7 @@ try {
   await page.getByRole("tab", { name: "Chat" }).click();
   const priorRunIds = new Set(projectedAfterRestart.filter((event) => event.type === "run.started").map((event) => event.data.run_id));
   await page.getByLabel("Message").fill("Reply with exactly RESTART_OK and do not use tools.");
+  acceptanceControl.signal.throwIfAborted();
   await page.getByRole("button", { name: "Send" }).click();
   await waitUntil(
     () => browserHistory(product!.origin, sessionId!),
@@ -403,7 +420,7 @@ try {
 } catch (error) {
   failure ??= safeError(error);
 } finally {
-  await browser?.close().catch(() => undefined);
+  await closeBrowser().catch((error) => { failure ??= safeError(error); });
   await product?.stop().catch((error) => { failure ??= safeError(error); });
   process.removeListener("SIGINT", interrupt);
   process.removeListener("SIGTERM", interrupt);

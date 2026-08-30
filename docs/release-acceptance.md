@@ -41,6 +41,8 @@ The driver creates an isolated Git fixture beneath `artifacts/release-acceptance
 
 Do not retry a failed live run automatically. Inspect its reported error and retained artifacts first because a missing CLI result does not prove that no provider request or tool effect occurred.
 
+SIGINT or SIGTERM aborts product startup or active execution and requests cleanup of both the product process and Chromium. A cleanup failure marks the report as failed.
+
 ## Evidence and pass conditions
 
 Each run prints and records its artifact directory. `artifacts/release-acceptance/latest.json` points to the latest directory, which contains:
