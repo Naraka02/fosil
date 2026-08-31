@@ -86,6 +86,29 @@ export interface UserTraceItem {
 
 export type TraceTimelineItem = UserTraceItem | TraceRecord;
 
+export interface SystemTraceItem {
+  kind: "system";
+  id: string;
+  runId: string;
+  requestId: string;
+  content: string[];
+  startedSeq: number;
+  recordedAt: string;
+}
+
+export interface ContextTraceItem {
+  kind: "context";
+  id: string;
+  runId: string;
+  requestId: string;
+  content: JsonValue;
+  name: string | null;
+  startedSeq: number;
+  recordedAt: string;
+}
+
+export type TraceMessageItem = SystemTraceItem | ContextTraceItem | UserTraceItem | ModelTraceRecord | ToolTraceRecord;
+
 export interface TraceStep {
   step: number;
   status: StepStatus;
@@ -143,6 +166,44 @@ export function traceRecordHasError(record: TraceRecord): boolean {
 
 export function traceTimelineItemHasError(item: TraceTimelineItem): boolean {
   return item.kind !== "user" && traceRecordHasError(item);
+}
+
+/** Build the message-oriented ledger without discarding the correlated operation evidence. */
+export function projectTraceMessages(trace: TraceProjection): TraceMessageItem[] {
+  const firstRequest = trace.timeline.find((item): item is ModelTraceRecord => item.kind === "model");
+  if (!firstRequest) return trace.timeline.filter((item): item is UserTraceItem | ToolTraceRecord => item.kind === "user" || item.kind === "tool");
+
+  const initialSystem: SystemTraceItem = {
+    kind: "system", id: `system:${firstRequest.requestId}`, runId: firstRequest.runId,
+    requestId: firstRequest.requestId, content: [...firstRequest.request.system_instructions],
+    startedSeq: firstRequest.startedSeq, recordedAt: firstRequest.recordedAt
+  };
+  const seenContexts = new Set<string>();
+  const contextItems: ContextTraceItem[] = [];
+  for (const item of trace.timeline) {
+    if (item.kind !== "model") continue;
+    item.request.messages.forEach((message, index) => {
+      if (message.role !== "system") return;
+      const signature = JSON.stringify({ content: message.content, name: message.name ?? null });
+      if (seenContexts.has(signature)) return;
+      seenContexts.add(signature);
+      contextItems.push({
+        kind: "context", id: `context:${item.requestId}:${index}`, runId: item.runId,
+        requestId: item.requestId, content: message.content, name: message.name ?? null,
+        startedSeq: item.startedSeq, recordedAt: item.recordedAt
+      });
+    });
+  }
+
+  const messages = trace.timeline.filter((item): item is UserTraceItem | ModelTraceRecord | ToolTraceRecord =>
+    item.kind === "user" || item.kind === "model" || item.kind === "tool");
+  const ordered = [...messages, ...contextItems].sort((left, right) => {
+    if (left.startedSeq !== right.startedSeq) return left.startedSeq - right.startedSeq;
+    if (left.kind === "context" && right.kind === "model") return -1;
+    if (left.kind === "model" && right.kind === "context") return 1;
+    return left.id.localeCompare(right.id);
+  });
+  return [initialSystem, ...ordered];
 }
 
 export function projectTrace(events: readonly Event[]): TraceProjection {

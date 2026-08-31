@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { eventSchema, type Event } from "@fosil/contracts";
-import { payloadFlags, projectTrace, traceRecordHasError, traceTimelineItemHasError } from "./trace-model.js";
+import { payloadFlags, projectTrace, projectTraceMessages, traceRecordHasError, traceTimelineItemHasError } from "./trace-model.js";
 
 const at = (second: number) => `2026-08-29T00:00:${String(second).padStart(2, "0")}.000Z`;
 const event = (seq: number, type: Event["type"], data: unknown, second = seq): Event => eventSchema.parse({ schema_version: 1, session_id: "session", seq, recorded_at: at(second), type, data });
 const correlation = { run_id: "run", step: 1, request_id: "request", attempt: 1 };
 const usage = { input_tokens: null, output_tokens: 3, total_tokens: null, cache_read_tokens: null, cache_write_tokens: 0 };
-const request = { provider: "controlled", model: "fixture", system_instructions: ["Inspect"], messages: [{ role: "user", content: "Edit" }], tools: [{ name: "edit_file", parameters: { type: "object" } }], settings: { temperature: null, top_p: 0, max_output_tokens: null } } as const;
+const request = { provider: "controlled", model: "fixture", system_instructions: ["Inspect"], messages: [{ role: "system", content: { kind: "context_checkpoint", summary: "Earlier work is complete." } }, { role: "user", content: "Edit" }], tools: [{ name: "edit_file", parameters: { type: "object" } }], settings: { temperature: null, top_p: 0, max_output_tokens: null } } as const;
 
 function history(): Event[] {
   return [
@@ -41,6 +41,9 @@ describe("Trace projection", () => {
     const approval = trace.records.find((record) => record.kind === "approval")!;
     expect(approval).toMatchObject({ id: "approval:approval", callId: "call", status: "allowed", waitMs: 2000, finishedAt: at(12) });
     expect(trace.runs[0]).toMatchObject({ approvalMode: "workspace_write", reason: "completed", finishedAt: at(14), steps: [{ reason: "completed", finishedAt: at(13) }] });
+    expect(projectTraceMessages(trace).map((item) => item.kind)).toEqual(["system", "user", "context", "model", "tool"]);
+    expect(projectTraceMessages(trace)[0]).toMatchObject({ kind: "system", content: ["Inspect"], requestId: "request" });
+    expect(projectTraceMessages(trace)[2]).toMatchObject({ kind: "context", content: { summary: "Earlier work is complete." }, requestId: "request" });
     expect(projectTrace(history())).toEqual(trace);
   });
 
