@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import type { Event, SessionSummary } from "@fosil/contracts";
-import { CommandDeliveryError, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
-import { appendCanonicalEvent, EventSequenceError, projectChat, type PendingApproval } from "./chat-model.js";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import type { ApprovalMode, DirectoryListing, Event, SessionSummary } from "@fosil/contracts";
+import { CommandDeliveryError, loadDirectories, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
+import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun, type PendingApproval } from "./chat-model.js";
+import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, FossilMark, MenuIcon, PanelIcon, PermissionIcon, PlusIcon, SendIcon, SettingsIcon } from "./icons.js";
+import { groupSessionsByWorkspace, sortSessionsByRecent, workspaceName } from "./session-model.js";
+import { Markdown } from "./Markdown.js";
 import { TraceView } from "./TraceView.js";
 import { StatusPill } from "./ui.js";
 import "./app.css";
@@ -9,23 +12,54 @@ import "./app.css";
 type Connection = "loading" | "live" | "reconnecting" | "offline";
 type View = "chat" | "trace";
 const savedSessionKey = "fosil.selected-session";
-const savedSession = () => { try { return localStorage.getItem(savedSessionKey); } catch { return null; } };
-const rememberSession = (value: string | null) => { try { if (value) localStorage.setItem(savedSessionKey, value); else localStorage.removeItem(savedSessionKey); } catch {} };
+const collapsedKey = "fosil.sidebar-collapsed";
+const approvalModeKey = "fosil.approval-mode";
+const readStorage = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
+const writeStorage = (key: string, value: string | null) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} };
+const readApprovalMode = (): ApprovalMode => {
+  const value = readStorage(approvalModeKey);
+  return value === "workspace_write" || value === "full_access" ? value : "manual";
+};
+const approvalModeTitle: Record<ApprovalMode, string> = {
+  manual: "所有写入和 Shell 操作均逐次请求批准",
+  workspace_write: "自动允许工作区内的托管文件写入；Shell 仍需手动批准",
+  full_access: "自动允许所有受支持工具，包括可能影响工作区外部的 Shell 命令"
+};
+const approvalModeLabel: Record<ApprovalMode, string> = { manual: "手动审批", workspace_write: "Workspace Write", full_access: "Full Access" };
+const approvalModes: ApprovalMode[] = ["manual", "workspace_write", "full_access"];
 const shortId = (value: string) => value.length > 10 ? value.slice(0, 8) : value;
-const workspaceName = (path: string) => path.split("/").filter(Boolean).at(-1) ?? path;
 const commandId = () => crypto.randomUUID();
 const json = (value: unknown) => JSON.stringify(value, null, 2);
+const connectionLabel: Record<Connection, string> = { loading: "连接中", live: "已连接", reconnecting: "重连中", offline: "离线" };
+const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+const numberLabel = new Intl.NumberFormat("zh-CN");
+const durationLabel = (value: number | null) => value === null ? "—" : value < 1_000 ? `${Math.round(value)} ms` : `${(value / 1_000).toFixed(value >= 10_000 ? 1 : 2)} s`;
+const tokenLabel = (value: number | null) => value === null ? "—" : numberLabel.format(value);
+const rateLabel = (value: number | null) => value === null ? "—" : value.toFixed(1);
+const percentageLabel = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(value === 0 ? 0 : 1)}%`;
+
+function Dialog({ title, onClose, children, className = "" }: { title: string; onClose(): void; children: ReactNode; className?: string }) {
+  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className={`dialog ${className}`} role="dialog" aria-modal="true" aria-label={title}>
+      <header className="dialog-header"><h2>{title}</h2><button className="icon-button" type="button" aria-label="关闭" onClick={onClose}><CloseIcon /></button></header>
+      {children}
+    </section>
+  </div>;
+}
 
 export function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(savedSession);
+  const [selectedId, setSelectedId] = useState<string | null>(() => readStorage(savedSessionKey));
   const [events, setEvents] = useState<Event[]>([]);
   const [connection, setConnection] = useState<Connection>("loading");
-  const [service, setService] = useState<ServiceStatus["status"]>("ready");
+  const [service, setService] = useState<ServiceStatus>({ status: "failed", model: "unknown" });
   const [commandError, setCommandError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState("");
+  const [directoryListing, setDirectoryListing] = useState<DirectoryListing | null>(null);
+  const [browsingDirectories, setBrowsingDirectories] = useState(false);
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [creating, setCreating] = useState(false);
   const [awaitingRun, setAwaitingRun] = useState<string | null>(null);
@@ -33,77 +67,85 @@ export function App() {
   const [cancelling, setCancelling] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [view, setView] = useState<View>("chat");
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [permissionWarningOpen, setPermissionWarningOpen] = useState(false);
+  const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<"general" | "runtime">("runtime");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStorage(collapsedKey) === "true");
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(readApprovalMode);
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(() => new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
+  const directoryRequest = useRef(0);
+  const permissionPickerRef = useRef<HTMLDivElement>(null);
   const eventsRef = useRef<Event[]>([]);
   const projection = useMemo(() => projectChat(events), [events]);
+  const latestRun = projection.runs.at(-1) ?? null;
+  const latestMetrics = latestRun ? summarizeChatRun(latestRun) : null;
+  const latestRound = projection.runs.length;
+  const activeRun = projection.runs.find((run) => run.runId === projection.activeRunId) ?? null;
+  const effectiveApprovalMode = activeRun?.approvalMode ?? approvalMode;
+  const workspaceGroups = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
   const selected = sessions.find((session) => session.session_id === selectedId) ?? null;
   const visibleError = commandError ?? streamError ?? listError;
+  const freshSession = !selected || projection.runs.length === 0;
 
   const refreshSessions = useCallback(async (signal?: AbortSignal) => {
-    const next = await loadSessions(signal);
+    const next = sortSessionsByRecent(await loadSessions(signal));
     setSessions(next); setListError(null);
+    setExpandedWorkspaces((current) => current.size ? current : new Set(next.map((session) => session.workspace_root)));
     setSelectedId((current) => {
       const choice = current && next.some((session) => session.session_id === current) ? current : next[0]?.session_id ?? null;
-      rememberSession(choice);
-      return choice;
+      writeStorage(savedSessionKey, choice); return choice;
     });
   }, []);
 
   useEffect(() => {
     const control = new AbortController();
-    const update = () => void refreshSessions(control.signal).catch((failure: unknown) => { if (!control.signal.aborted) setListError(failure instanceof Error ? failure.message : "Could not list sessions"); });
+    const update = () => void refreshSessions(control.signal).catch((failure: unknown) => { if (!control.signal.aborted) setListError(failure instanceof Error ? failure.message : "无法读取会话列表"); });
     update(); const timer = window.setInterval(update, 2500);
     return () => { control.abort(); window.clearInterval(timer); };
   }, [refreshSessions]);
 
   useEffect(() => {
+    if (!permissionMenuOpen) return;
+    const dismiss = (event: PointerEvent) => { if (!permissionPickerRef.current?.contains(event.target as Node)) setPermissionMenuOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setPermissionMenuOpen(false); };
+    document.addEventListener("pointerdown", dismiss); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
+  }, [permissionMenuOpen]);
+
+  useEffect(() => {
     const control = new AbortController();
-    const update = () => void loadServiceStatus(control.signal).then((result) => setService(result.status)).catch(() => setService("failed"));
+    const update = () => void loadServiceStatus(control.signal).then(setService).catch(() => setService((current) => ({ ...current, status: "failed" })));
     update(); const timer = window.setInterval(update, 3000);
     return () => { control.abort(); window.clearInterval(timer); };
   }, []);
 
   useEffect(() => {
     if (!selectedId) { eventsRef.current = []; setEvents([]); setConnection("offline"); return; }
-    let disposed = false;
-    let source: EventSource | undefined;
-    let retry: number | undefined;
+    let disposed = false; let source: EventSource | undefined; let retry: number | undefined;
     const control = new AbortController();
-    const reconnect = () => {
-      source?.close();
-      if (disposed) return;
-      setConnection("reconnecting");
-      if (retry !== undefined) window.clearTimeout(retry);
-      retry = window.setTimeout(() => { retry = undefined; void connect(); }, 400);
-    };
+    const reconnect = () => { source?.close(); if (disposed) return; setConnection("reconnecting"); if (retry !== undefined) window.clearTimeout(retry); retry = window.setTimeout(() => { retry = undefined; void connect(); }, 400); };
     const connect = async () => {
       try {
-        setConnection("loading");
-        const history = await loadHistory(selectedId, control.signal);
-        if (disposed) return;
+        setConnection("loading"); const history = await loadHistory(selectedId, control.signal); if (disposed) return;
         eventsRef.current = history; setEvents(history);
         source = new EventSource(`/api/sessions/${encodeURIComponent(selectedId)}/events?after=${history.at(-1)?.seq ?? 0}`);
         source.onopen = () => { if (!disposed) { setConnection("live"); setStreamError(null); } };
         source.addEventListener("execution", (incoming) => {
-          try {
-            const event = parseStreamEvent((incoming as MessageEvent<string>).data);
-            const next = appendCanonicalEvent(eventsRef.current, event);
-            eventsRef.current = next; setEvents(next);
-          } catch (failure) {
-            setStreamError(failure instanceof EventSequenceError ? "Saved history changed while streaming. Rebuilding the view." : "The event stream contained invalid data.");
-            reconnect();
-          }
+          try { const next = appendCanonicalEvent(eventsRef.current, parseStreamEvent((incoming as MessageEvent<string>).data)); eventsRef.current = next; setEvents(next); }
+          catch (failure) { setStreamError(failure instanceof EventSequenceError ? "流式读取时历史已变化，正在重建视图。" : "事件流包含无效数据。"); reconnect(); }
         });
         source.onerror = reconnect;
       } catch (failure) {
         if (disposed || control.signal.aborted) return;
-        setConnection("offline"); setStreamError(failure instanceof Error ? failure.message : "Could not load session history");
-        if (retry !== undefined) window.clearTimeout(retry);
-        retry = window.setTimeout(() => { retry = undefined; void connect(); }, 1000);
+        setConnection("offline"); setStreamError(failure instanceof Error ? failure.message : "无法读取会话历史");
+        if (retry !== undefined) window.clearTimeout(retry); retry = window.setTimeout(() => { retry = undefined; void connect(); }, 1000);
       }
     };
-    void connect();
-    return () => { disposed = true; control.abort(); source?.close(); if (retry !== undefined) window.clearTimeout(retry); };
+    void connect(); return () => { disposed = true; control.abort(); source?.close(); if (retry !== undefined) window.clearTimeout(retry); };
   }, [selectedId]);
 
   useEffect(() => {
@@ -113,87 +155,156 @@ export function App() {
     bottomRef.current?.scrollIntoView({ block: "end", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [awaitingRun, cancelling, projection, settlingApproval]);
 
-  const selectSession = (id: string) => {
-    setSelectedId(id); rememberSession(id); setCommandError(null); setStreamError(null); setUncertain(false);
-  };
+  const selectSession = (id: string) => { setSelectedId(id); writeStorage(savedSessionKey, id); setCommandError(null); setStreamError(null); setUncertain(false); setMobileNavOpen(false); };
   const mutationFailed = (failure: unknown) => {
     const deliveryUncertain = !(failure instanceof CommandDeliveryError) || failure.uncertain;
-    const message = failure instanceof Error ? failure.message : "Command delivery failed";
-    setCommandError(deliveryUncertain ? `${message}. Delivery may be uncertain; refresh to reconcile before trying again.` : message);
-    setUncertain(deliveryUncertain);
+    const detail = failure instanceof Error ? failure.message : "命令发送失败";
+    setCommandError(deliveryUncertain ? `${detail}。发送结果可能不确定，请刷新核对后再试。` : detail); setUncertain(deliveryUncertain);
   };
   const createSession = async (event: FormEvent) => {
     event.preventDefault(); if (!workspace.trim() || creating || uncertain) return;
     setCreating(true); setCommandError(null);
-    try {
-      const ack = await sendCommand({ type: "session.create", command_id: commandId(), workspace_root: workspace.trim() });
-      await refreshSessions(); selectSession(ack.session_id); setWorkspace("");
-    } catch (failure) { mutationFailed(failure); } finally { setCreating(false); }
+    try { const ack = await sendCommand({ type: "session.create", command_id: commandId(), workspace_root: workspace.trim() }); await refreshSessions(); selectSession(ack.session_id); setWorkspace(""); setNewSessionOpen(false); }
+    catch (failure) { mutationFailed(failure); } finally { setCreating(false); }
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!selectedId || !message.trim() || projection.activeRunId || awaitingRun || uncertain) return;
     const content = message.trim(); setCommandError(null);
-    try {
-      const ack = await sendCommand({ type: "run.submit", command_id: commandId(), session_id: selectedId, content });
-      setAwaitingRun(ack.run_id); setMessage(""); await refreshSessions();
-    } catch (failure) { mutationFailed(failure); }
+    try { const ack = await sendCommand({ type: "run.submit", command_id: commandId(), session_id: selectedId, content, approval_mode: approvalMode }); setAwaitingRun(ack.run_id); setMessage(""); await refreshSessions(); }
+    catch (failure) { mutationFailed(failure); }
   };
   const resolveApproval = async (approval: PendingApproval, decision: "allow" | "deny") => {
-    if (!selectedId || settlingApproval || uncertain) return;
-    setSettlingApproval(approval.approvalId); setCommandError(null);
-    try {
-      await sendCommand({ type: "approval.resolve", command_id: commandId(), session_id: selectedId, run_id: approval.runId, approval_id: approval.approvalId, decision });
-      await refreshSessions();
-    } catch (failure) { setSettlingApproval(null); mutationFailed(failure); }
+    if (!selectedId || settlingApproval || uncertain) return; setSettlingApproval(approval.approvalId); setCommandError(null);
+    try { await sendCommand({ type: "approval.resolve", command_id: commandId(), session_id: selectedId, run_id: approval.runId, approval_id: approval.approvalId, decision }); await refreshSessions(); }
+    catch (failure) { setSettlingApproval(null); mutationFailed(failure); }
   };
   const cancel = async () => {
-    if (!selectedId || !projection.activeRunId || cancelling || uncertain) return;
-    setCancelling(true); setCommandError(null);
-    try {
-      await sendCommand({ type: "run.cancel", command_id: commandId(), session_id: selectedId, run_id: projection.activeRunId });
-      await refreshSessions();
-    } catch (failure) { setCancelling(false); mutationFailed(failure); }
+    if (!selectedId || !projection.activeRunId || cancelling || uncertain) return; setCancelling(true); setCommandError(null);
+    try { await sendCommand({ type: "run.cancel", command_id: commandId(), session_id: selectedId, run_id: projection.activeRunId }); await refreshSessions(); }
+    catch (failure) { setCancelling(false); mutationFailed(failure); }
   };
+  const toggleSidebar = () => setSidebarCollapsed((current) => { const next = !current; writeStorage(collapsedKey, String(next)); return next; });
+  const saveApprovalMode = (mode: ApprovalMode) => { setApprovalMode(mode); writeStorage(approvalModeKey, mode); };
+  const chooseApprovalMode = (mode: ApprovalMode) => {
+    setPermissionMenuOpen(false);
+    if (mode === "full_access" && approvalMode !== "full_access") setPermissionWarningOpen(true);
+    else saveApprovalMode(mode);
+  };
+  const toggleWorkspace = (root: string) => setExpandedWorkspaces((current) => { const next = new Set(current); if (next.has(root)) next.delete(root); else next.add(root); return next; });
+  const browseWorkspace = async (path?: string) => {
+    const request = ++directoryRequest.current; setBrowsingDirectories(true); setDirectoryError(null);
+    try {
+      const listing = await loadDirectories(path);
+      if (request !== directoryRequest.current) return;
+      setDirectoryListing(listing); setWorkspace(listing.path);
+    } catch {
+      if (request === directoryRequest.current) setDirectoryError("无法读取该本地目录");
+    } finally { if (request === directoryRequest.current) setBrowsingDirectories(false); }
+  };
+  const openWorkspaceDialog = () => {
+    setNewSessionOpen(true); setDirectoryListing(null); setDirectoryError(null);
+    void browseWorkspace(workspace.trim() || undefined);
+  };
+  const closeWorkspaceDialog = () => { directoryRequest.current++; setNewSessionOpen(false); setBrowsingDirectories(false); };
 
-  return <div className="app-shell">
-    <aside className="sidebar" aria-label="Saved sessions">
-      <div className="brand"><span className="brand-mark" aria-hidden="true">F</span><div><strong>Fosil</strong><small>Local execution</small></div></div>
-      <form className="new-session" onSubmit={createSession}>
-        <label htmlFor="workspace">Workspace path</label>
-        <div className="field-row"><input id="workspace" value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/home/me/project" required /><button type="submit" disabled={creating || uncertain}>{creating ? "Creating" : "New"}</button></div>
-      </form>
-      <div className="session-heading"><span>Sessions</span><span>{sessions.length}</span></div>
-      <nav className="session-list">
-        {sessions.map((session) => <button key={session.session_id} className={session.session_id === selectedId ? "session active" : "session"} onClick={() => selectSession(session.session_id)}>
-          <span className="session-name">{workspaceName(session.workspace_root)}</span><StatusPill status={session.activity} /><small>{session.workspace_root}</small><small>ID {shortId(session.session_id)}</small>
-        </button>)}
-        {!sessions.length && <p className="empty-sidebar">Create a session from an absolute Linux workspace path.</p>}
-      </nav>
-    </aside>
+  const navigation = <>
+    <div className="brand"><FossilMark className="brand-mark" /><div className="brand-copy"><strong>Fosil Local</strong><small>本地构建</small></div><span className="build-badge">LOCAL</span><button className="icon-button desktop-collapse" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} onClick={toggleSidebar}><PanelIcon /></button></div>
+    <button className="new-session-button" type="button" onClick={openWorkspaceDialog}><PlusIcon /><span>新建会话</span></button>
+    <div className="session-heading"><span>工作区</span><div className="workspace-heading-actions"><span>{workspaceGroups.length}</span><button type="button" aria-label="添加工作区" title="添加本地工作区" onClick={openWorkspaceDialog}><PlusIcon /></button></div></div>
+    <nav className="workspace-list" aria-label="已保存会话">
+      {workspaceGroups.map((group) => {
+        const expanded = expandedWorkspaces.has(group.root); return <section className="workspace-group" key={group.root}>
+          <button className="workspace-toggle" type="button" aria-expanded={expanded} onClick={() => toggleWorkspace(group.root)} title={group.root}>
+            <ChevronIcon className={expanded ? "open" : ""} /><FolderIcon /><span><strong>{group.name}</strong><small>{group.sessions.length} 个会话 · {timeLabel(group.updatedAt)}</small></span>
+          </button>
+          {expanded && <div className="session-list">{group.sessions.map((session) => <button key={session.session_id} type="button" className={session.session_id === selectedId ? "session active" : "session"} onClick={() => selectSession(session.session_id)} title={`${session.title} · ${session.session_id}`}>
+            <span className="session-dot" aria-hidden="true" /><span><strong>{session.title}</strong><small>{timeLabel(session.updated_at)}</small></span><StatusPill status={session.activity} compact />
+          </button>)}</div>}
+        </section>;
+      })}
+      {!sessions.length && <p className="empty-sidebar">还没有会话。选择一个绝对路径，开始保存本地执行历史。</p>}
+    </nav>
+    <button className="settings-button" type="button" onClick={() => setSettingsOpen(true)}><SettingsIcon /><span>设置</span></button>
+  </>;
+
+  const composer = <form className="composer" onSubmit={submit}>
+    <label className="sr-only" htmlFor="message">消息</label>
+    <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder={selected ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={2} />
+      <div className="composer-footer"><span className="composer-context"><FolderIcon />{selected ? workspaceName(selected.workspace_root) : "尚未选择工作区"}</span><div className={`permission-picker permission-${effectiveApprovalMode}`} ref={permissionPickerRef}>
+        <button className="permission-trigger" type="button" aria-label={`权限审批模式：${approvalModeLabel[effectiveApprovalMode]}`} aria-haspopup="menu" aria-expanded={permissionMenuOpen} title={approvalModeTitle[effectiveApprovalMode]} disabled={!!projection.activeRunId || !!awaitingRun || uncertain} onClick={() => setPermissionMenuOpen((current) => !current)}><PermissionIcon /><span>{approvalModeLabel[effectiveApprovalMode]}</span><ChevronIcon className={permissionMenuOpen ? "open" : ""} /></button>
+        {permissionMenuOpen && <section className="permission-menu" role="menu" aria-label="选择权限审批模式"><header><div><strong>权限审批模式</strong><span>用于下一次运行</span></div><kbd>ESC</kbd></header><div className="permission-options">{approvalModes.map((mode) => <button key={mode} type="button" role="menuitemradio" aria-checked={approvalMode === mode} className={approvalMode === mode ? "selected" : ""} onClick={() => chooseApprovalMode(mode)}><span className={`permission-option-icon permission-option-${mode}`}><PermissionIcon /></span><span className="permission-option-copy"><strong>{approvalModeLabel[mode]}{mode === "full_access" && <em>高风险</em>}</strong><small>{approvalModeTitle[mode]}</small></span>{approvalMode === mode && <CheckIcon className="permission-check" />}</button>)}</div><footer>所选模式会持久化到运行记录与 Trace</footer></section>}
+      </div><span className="composer-hint">{projection.activeRunId ? "当前会话正在执行" : "持久事件模式"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
+      {latestRun && latestMetrics && <div className="composer-metrics" aria-label={`第 ${latestRound} 轮运行统计`} title="速度按输出 token 除以模型生成阶段耗时计算；缓存命中按缓存读取 token 除以输入 token 计算。">
+        <span><b>{latestRound}</b> 轮 <b>{latestMetrics.steps}</b> 步</span>
+        <span>LLM 调用 <b>{durationLabel(latestMetrics.llmDurationMs)}</b> 工具调用 <b>{durationLabel(latestMetrics.toolDurationMs)}</b></span>
+        <span>首 token 平均 <b>{durationLabel(latestMetrics.averageFirstTokenMs)}</b> <b>{rateLabel(latestMetrics.tokensPerSecond)}</b> tok/s</span>
+        <span>缓存命中 <b>{percentageLabel(latestMetrics.cacheHitRate)}</b></span>
+        <span>输入 <b>{tokenLabel(latestMetrics.inputTokens)}</b> tok 输出 <b>{tokenLabel(latestMetrics.outputTokens)}</b> tok</span>
+      </div>}
+    </div>
+  </form>;
+
+  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${freshSession ? "fresh-session" : ""}`}>
+    <aside className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`}>{navigation}</aside>
+    {mobileNavOpen && <button className="mobile-scrim" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
     <main className="workspace">
       <header className="topbar">
-        <div><p className="eyebrow">Chat control</p><h1>{selected ? workspaceName(selected.workspace_root) : "No session selected"}</h1>{selected && <p className="workspace-path">{selected.workspace_root}</p>}</div>
-        <div className="topbar-actions"><div className="view-switch" role="tablist" aria-label="Session view"><button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "selected" : ""} onClick={() => setView("chat")}>Chat</button><button role="tab" aria-selected={view === "trace"} className={view === "trace" ? "selected" : ""} onClick={() => setView("trace")}>Trace</button></div><StatusPill status={service} /><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connection}</span>{projection.activeRunId && <button className="secondary danger" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "Cancelling" : "Cancel run"}</button>}</div>
+        <button className="icon-button mobile-menu" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}><MenuIcon /></button>
+        <div className="session-context"><h1>{selected?.title ?? "Fosil"}</h1><p>{selected ? workspaceName(selected.workspace_root) : "本地执行"}</p></div>
+        <div className="topbar-actions"><div className="view-switch" role="tablist" aria-label="会话视图"><button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "selected" : ""} onClick={() => setView("chat")}>对话</button><button role="tab" aria-selected={view === "trace"} className={view === "trace" ? "selected" : ""} onClick={() => setView("trace")}>轨迹</button></div><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connectionLabel[connection]}</span>{projection.activeRunId && <button className="cancel-button" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "取消中" : "取消运行"}</button>}</div>
       </header>
-      {visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>Refresh now</button>}</div>}
-      {view === "chat" ? <><section className="conversation" aria-live="polite" aria-label="Conversation">
-        {!selected && <div className="empty-state"><p className="eyebrow">Start local</p><h2>Open a workspace session</h2><p>Enter an absolute Linux path to create durable history for a repository.</p></div>}
-        {selected && !projection.runs.length && connection !== "loading" && <div className="empty-state"><p className="eyebrow">Ready</p><h2>Give the agent a concrete task</h2><p>Messages, model output, tool activity, approvals, and cancellation are reconstructed from saved events.</p></div>}
+      {visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>立即刷新</button>}</div>}
+      {view === "chat" ? <div className="chat-view"><section className="conversation" aria-live="polite" aria-label="对话">
+        {!selected && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><p>从左侧新建会话，选择一个工作区开始构建。</p></div>}
+        {selected && !projection.runs.length && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><div className="welcome-context"><FolderIcon /><strong>{workspaceName(selected.workspace_root)}</strong><span /><StatusPill status={service.status} /></div></div>}
         {projection.runs.map((run) => <article className="run" key={run.runId} data-run-status={run.status}>
-          <div className="message user-message"><div className="message-meta"><strong>You</strong><StatusPill status={run.status} /></div><p>{run.userContent}</p></div>
-          {run.assistants.filter((turn) => turn.text || turn.status !== "running").map((turn) => <div className="message assistant-message" key={turn.requestId}><div className="message-meta"><strong>Agent</strong><span>step {turn.step}</span></div>{turn.text && <p>{turn.text}</p>}{turn.error && <p className="inline-error">{turn.error}</p>}{turn.status === "running" && <span className="streaming">Receiving saved output</span>}</div>)}
-          {run.tools.map((tool) => <details className="tool-row" key={tool.callId}><summary><span>Tool · {tool.name}</span><StatusPill status={tool.status} /></summary><pre>{json(tool.arguments)}</pre></details>)}
-          {projection.pendingApprovals.filter((approval) => approval.runId === run.runId).map((approval) => <div className="approval" key={approval.approvalId}>
-            <div><p className="eyebrow">Approval required</p><h3>{approval.toolName}</h3><p className="approval-cwd">Working directory: {approval.cwd}</p></div><pre>{json(approval.arguments)}</pre><div className="approval-actions"><button className="secondary" onClick={() => void resolveApproval(approval, "deny")} disabled={settlingApproval === approval.approvalId || uncertain}>Deny</button><button onClick={() => void resolveApproval(approval, "allow")} disabled={settlingApproval === approval.approvalId || uncertain}>{settlingApproval === approval.approvalId ? "Saving decision" : "Allow once"}</button></div>
-          </div>)}
-          {run.cancelRequested && run.status === "cancelling" && <p className="run-note">Cancellation requested. Waiting for owned work to stop.</p>}
+          <div className="message user-message"><div className="message-meta"><strong>你</strong><StatusPill status={run.status} /></div><p>{run.userContent}</p></div>
+          {run.activities.map((activity) => {
+            if (activity.kind === "assistant") {
+              const turn = activity.assistant;
+              if (!turn.text && turn.status === "running") return <div className="message assistant-message" key={turn.requestId}><div className="message-meta"><strong><FossilMark />Fosil</strong><span>步骤 {turn.step}</span></div><span className="streaming">正在接收已保存输出</span></div>;
+              return <div className="message assistant-message" key={turn.requestId}><div className="message-meta"><strong><FossilMark />Fosil</strong><span>步骤 {turn.step}</span></div>{turn.text && <Markdown>{turn.text}</Markdown>}{turn.error && <p className="inline-error">{turn.error}</p>}{turn.status === "running" && <span className="streaming">正在接收已保存输出</span>}</div>;
+            }
+            const tool = activity.tool;
+            const approval = projection.pendingApprovals.find((item) => item.callId === tool.callId);
+            return <div className="tool-activity" key={tool.callId} data-step={tool.step}>
+              <details className="tool-row"><summary><span>步骤 {tool.step} · 工具 · {tool.name}</span><StatusPill status={tool.status} /></summary><div className="tool-detail"><section><strong>参数</strong><pre>{json(tool.arguments)}</pre></section>{tool.result !== null && <section><strong>结果</strong><pre>{json(tool.result)}</pre></section>}{tool.error && <section><strong>错误</strong><pre className="tool-error">{tool.error}</pre></section>}</div></details>
+              {approval && <div className="approval" role="region" aria-label={`${approval.toolName} 需要批准`}>
+                <div className="approval-heading"><span className="approval-icon">!</span><div><p className="eyebrow">需要批准</p><h3>{approval.toolName === "shell" ? "运行 Shell 命令" : approval.toolName === "edit_file" ? "修改工作区文件" : `执行 ${approval.toolName}`}</h3><p className="approval-cwd"><span>工作目录</span><code>{approval.cwd}</code></p></div></div><div className="approval-command"><span>调用参数</span><pre>{json(approval.arguments)}</pre></div><div className="approval-actions"><small>审批决定会写入会话事件</small><button className="secondary" onClick={() => void resolveApproval(approval, "deny")} disabled={settlingApproval === approval.approvalId || uncertain}>拒绝</button><button onClick={() => void resolveApproval(approval, "allow")} disabled={settlingApproval === approval.approvalId || uncertain}>{settlingApproval === approval.approvalId ? "正在保存" : "仅允许本次"}</button></div>
+              </div>}
+            </div>;
+          })}
+          {run.cancelRequested && run.status === "cancelling" && <p className="run-note">已请求取消，正在等待归属任务停止。</p>}
         </article>)}
         <div ref={bottomRef} />
-      </section>
-      <form className="composer" onSubmit={submit}>
-        <label htmlFor="message">Message</label><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder={selected ? "Describe the task and expected result" : "Select or create a session first"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={3} />
-        <div className="composer-footer"><span>{projection.activeRunId ? "One active run per session" : "Commands are sent once and progress is read from saved history"}</span><button type="submit" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}>{awaitingRun ? "Accepted" : "Send"}</button></div>
-      </form></> : <TraceView events={events} />}
+      </section>{composer}</div> : <TraceView events={events} />}
     </main>
+
+    {newSessionOpen && <Dialog title="选择本地工作区" onClose={closeWorkspaceDialog} className="new-session-dialog"><form onSubmit={createSession}>
+      <div className="dialog-body workspace-picker"><label htmlFor="workspace">工作区路径</label><div className="workspace-path-row"><div className="path-field"><FolderIcon /><input id="workspace" autoFocus value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/home/me/project" required /></div><button className="secondary" type="button" onClick={() => void browseWorkspace(workspace.trim())} disabled={browsingDirectories || !workspace.trim()}>转到</button></div>
+        <p>选择已有本地目录，或输入绝对 Linux 路径后转到。这里只读取目录名称，不读取文件内容。</p>
+        <div className="directory-browser" aria-busy={browsingDirectories}>
+          <header><strong>本地目录</strong><span>{directoryListing?.path ?? (browsingDirectories ? "正在读取…" : "未加载")}</span></header>
+          <div className="directory-list">
+            {directoryListing?.parent && <button type="button" className="directory-row directory-parent" onClick={() => void browseWorkspace(directoryListing.parent!)} disabled={browsingDirectories} title={directoryListing.parent}><ChevronIcon /><FolderIcon /><span><strong>返回上级</strong><small>{directoryListing.parent}</small></span></button>}
+            {directoryListing?.directories.map((directory) => <button type="button" className="directory-row" key={directory.path} onClick={() => void browseWorkspace(directory.path)} disabled={browsingDirectories} title={directory.path}><ChevronIcon /><FolderIcon /><span><strong>{directory.name}</strong><small>{directory.path}</small></span></button>)}
+            {!browsingDirectories && directoryListing && !directoryListing.directories.length && <p className="directory-empty">此目录下没有可选择的子目录。</p>}
+            {browsingDirectories && <p className="directory-empty">正在读取本地目录…</p>}
+          </div>
+          {directoryListing?.truncated && <p className="directory-limit">仅显示排序后的前 500 个目录，可输入更具体的路径继续浏览。</p>}
+        </div>
+        {directoryError && <p className="directory-error" role="alert">{directoryError}。仍可直接输入有效绝对路径创建会话。</p>}
+      </div>
+      <footer className="dialog-actions"><button className="secondary" type="button" onClick={closeWorkspaceDialog}>取消</button><button type="submit" disabled={creating || uncertain || !workspace.trim()}>{creating ? "正在创建" : "在此创建会话"}</button></footer>
+    </form></Dialog>}
+
+    {settingsOpen && <Dialog title="设置" onClose={() => setSettingsOpen(false)} className="settings-dialog"><div className="settings-layout">
+      <nav aria-label="设置类别"><button className={settingsSection === "general" ? "selected" : ""} onClick={() => setSettingsSection("general")}><SettingsIcon />通用设置</button><button className={settingsSection === "runtime" ? "selected" : ""} onClick={() => setSettingsSection("runtime")}><PanelIcon />运行时状态</button></nav>
+      <div className="settings-content">{settingsSection === "general" ? <section><h3>通用设置</h3><p className="settings-lead">调整仅保存在当前浏览器中的界面偏好。</p><div className="setting-row"><div><strong>收起桌面侧栏</strong><p>仅保留标志与操作图标。</p></div><button className={`switch ${sidebarCollapsed ? "on" : ""}`} type="button" role="switch" aria-checked={sidebarCollapsed} onClick={toggleSidebar}><span /></button></div></section> :
+        <section><h3>运行时状态</h3><p className="settings-lead">这些信息来自当前 Fosil 服务，仅供读取。</p><div className="provider-row"><strong>Fosil Runtime</strong><StatusPill status={service.status} /></div><dl className="runtime-grid"><div><dt>事件连接</dt><dd><span className={`connection connection-${connection}`}><span />{connectionLabel[connection]}</span></dd></div><div><dt>模型</dt><dd>{service.model}</dd></div><div><dt>工作区</dt><dd>{selected?.workspace_root ?? "未选择"}</dd></div><div><dt>会话</dt><dd>{selected ? shortId(selected.session_id) : "未选择"}</dd></div></dl></section>}
+      </div>
+    </div></Dialog>}
+
+    {permissionWarningOpen && <Dialog title="启用 Full Access" onClose={() => setPermissionWarningOpen(false)} className="permission-dialog"><div className="dialog-body permission-warning"><div className="permission-warning-intro"><span className="permission-warning-mark">!</span><div><p className="eyebrow">高风险权限模式</p><h3>所有工具将不再逐次询问</h3><p>Full Access 会自动允许受支持工具，包括 Shell。它不是工作区沙箱。</p></div></div><ul><li><span />Shell 可读取或修改工作区外的文件</li><li><span />命令可启动进程并产生主机级影响</li><li><span />该选择会写入下一次运行记录</li></ul></div><footer className="dialog-actions permission-warning-actions"><small>仅影响之后提交的运行</small><button className="secondary" type="button" onClick={() => setPermissionWarningOpen(false)}>取消</button><button className="danger-button" type="button" onClick={() => { saveApprovalMode("full_access"); setPermissionWarningOpen(false); }}>启用 Full Access</button></footer></Dialog>}
   </div>;
 }

@@ -28,6 +28,6 @@ export function fileToolDefinitions() {
   return [
     { name: "read_file", description: "Read one bounded UTF-8 file and its SHA-256 digest.", parameters: z.toJSONSchema(readArguments) },
     { name: "search_text", description: "Find literal text within one UTF-8 file, with line numbers and bounded previews.", parameters: z.toJSONSchema(searchArguments) },
-    { name: "edit_file", description: "Replace an existing UTF-8 file only when its SHA-256 digest still matches; requires approval.", parameters: z.toJSONSchema(editArguments) }
+    { name: "edit_file", description: "Replace an existing UTF-8 file only when its SHA-256 digest still matches. Manual mode requires approval; workspace-write and full-access modes allow the managed in-workspace edit.", parameters: z.toJSONSchema(editArguments) }
   ];
 }

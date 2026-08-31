@@ -26,11 +26,13 @@ export const requestStatusSchema = z.enum(["running", "succeeded", "failed", "ca
 export const requestTerminalStatusSchema = requestStatusSchema.extract(["succeeded", "failed", "cancelled", "interrupted"]);
 export const toolStatusSchema = z.enum(["created", "waiting_for_approval", "running", "succeeded", "failed", "denied", "cancelled", "interrupted"]);
 export const approvalStatusSchema = z.enum(["pending", "allowed", "denied", "expired", "cancelled"]);
+export const approvalModeSchema = z.enum(["manual", "workspace_write", "full_access"]);
 export type RunStatus = z.infer<typeof runStatusSchema>;
 export type StepStatus = z.infer<typeof stepStatusSchema>;
 export type RequestStatus = z.infer<typeof requestStatusSchema>;
 export type ToolStatus = z.infer<typeof toolStatusSchema>;
 export type ApprovalStatus = z.infer<typeof approvalStatusSchema>;
+export type ApprovalMode = z.infer<typeof approvalModeSchema>;
 
 export const reasonSchema = z.enum([
   "completed", "model_failed", "tool_failed", "validation_failed", "limit_exceeded",
@@ -157,7 +159,7 @@ export const sessionCreatedEventSchema = envelope("session.created", z.object({
 export const sessionCreatedEventInputSchema = sessionCreatedEventSchema.omit({ seq: true });
 
 export const runStartedEventSchema = envelope("run.started", z.object({
-  ...runCorrelation, command_id: id, origin: z.enum(["user", "system", "runner"])
+  ...runCorrelation, command_id: id, approval_mode: approvalModeSchema.optional(), origin: z.enum(["user", "system", "runner"])
 }).strict());
 export const userMessageEventSchema = envelope("user.message", z.object({
   ...runCorrelation, command_id: id, content: z.string(), origin: z.literal("user")
@@ -315,7 +317,7 @@ export function parseEventInput(value: unknown): EventInput { return eventInputS
 /** User commands contain no server-assigned identities or timestamps. */
 export const commandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("session.create"), command_id: id, workspace_root: absolutePath }).strict(),
-  z.object({ type: z.literal("run.submit"), command_id: id, session_id: id, content: z.string().min(1) }).strict(),
+  z.object({ type: z.literal("run.submit"), command_id: id, session_id: id, content: z.string().min(1), approval_mode: approvalModeSchema.optional() }).strict(),
   z.object({ type: z.literal("run.cancel"), command_id: id, session_id: id, run_id: id }).strict(),
   z.object({
     type: z.literal("approval.resolve"), command_id: id, session_id: id, run_id: id,
@@ -349,16 +351,28 @@ export type HistoryCursor = z.infer<typeof historyCursorSchema>;
 export type HistoryPageRequest = z.input<typeof historyPageRequestSchema>;
 export type HistoryPage = z.infer<typeof historyPageSchema>;
 
-/** Session discovery exposes the same saved index projection as a single-session read. */
+/** Session discovery exposes one replay-derived summary shape for list and single-session reads. */
 export const sessionSummarySchema = z.object({
-  session_id: id, workspace_root: absolutePath, last_seq: positiveInt, active_run_id: id.nullable(),
-  activity: z.enum(["idle", "running", "waiting_for_approval", "cancelling"])
+  session_id: id, title: z.string().min(1), workspace_root: absolutePath, last_seq: positiveInt, active_run_id: id.nullable(),
+  activity: z.enum(["idle", "running", "waiting_for_approval", "cancelling"]), updated_at: isoTimestamp
 }).strict();
 export const sessionListRequestSchema = z.object({ after: id.optional(), limit: positiveInt.max(200).default(100) }).strict();
 export const sessionListSchema = z.object({ sessions: z.array(sessionSummarySchema), next_after: id.nullable() }).strict();
 export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type SessionListRequest = z.input<typeof sessionListRequestSchema>;
 export type SessionList = z.infer<typeof sessionListSchema>;
+
+/** Read-only local directory discovery for the same-origin workspace picker. */
+export const directoryListingQuerySchema = z.object({ path: absolutePath.optional() }).strict();
+export const directoryEntrySchema = z.object({ name: id, path: absolutePath }).strict();
+export const directoryListingSchema = z.object({
+  path: absolutePath,
+  parent: absolutePath.nullable(),
+  directories: z.array(directoryEntrySchema),
+  truncated: z.boolean()
+}).strict();
+export type DirectoryEntry = z.infer<typeof directoryEntrySchema>;
+export type DirectoryListing = z.infer<typeof directoryListingSchema>;
 
 /** HTTP positions are canonical decimal safe integers; no coercion of empty or fractional values. */
 export const sequenceTextSchema = z.string().regex(/^(0|[1-9][0-9]*)$/).refine((value) => Number.isSafeInteger(Number(value)));
@@ -367,5 +381,6 @@ export const sessionListQuerySchema = z.object({ after: id.optional(), limit: pa
 export const historyQuerySchema = z.object({ cursor: z.string().optional(), limit: pageLimitText.optional() }).strict();
 export const streamQuerySchema = z.object({ after: z.string().optional() }).strict();
 export const sessionParamsSchema = z.object({ sessionId: id }).strict();
-export const serviceStatusSchema = z.object({ status: z.enum(["ready", "failed", "stopping"]) }).strict();
+export const serviceStatusSchema = z.object({ status: z.enum(["ready", "failed", "stopping"]), model: id }).strict();
+export type ServiceStatus = z.infer<typeof serviceStatusSchema>;
 export const apiErrorSchema = z.object({ error: z.object({ code: id, message: z.string() }).strict() }).strict();

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fileToolDefinitions, toolDefinitions, parseEventInput, parseFileToolInvocation, type Event, type EventInput, type JsonValue } from "@fosil/contracts";
+import { fileToolDefinitions, toolDefinitions, parseEventInput, parseFileToolInvocation, type ApprovalMode, type Event, type EventInput, type JsonValue } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { FileToolService, type FileToolServiceOptions, type ToolAdvance } from "./file-tool-service.js";
 import { ToolService } from "./tool-service.js";
@@ -38,7 +38,7 @@ async function directory() {
   directories.push(path);
   return path;
 }
-async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService, shared?: { store: HookStore; database: string; service: ToolService }) {
+async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions & { approvalMode?: ApprovalMode } = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService, shared?: { store: HookStore; database: string; service: ToolService }) {
   const root = await directory();
   const store = shared?.store ?? new HookStore(new URL("../dist/storage-worker.js", import.meta.url));
   const database = shared?.database ?? join(root, "events.db");
@@ -46,7 +46,7 @@ async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt
   await writeFile(join(root, "target.txt"), "before\n");
   const session = await store.execute({ type: "session.create", command_id: shared ? `create-${root}` : "create", workspace_root: root });
   const sessionId = session.session_id;
-  const run = await store.execute({ type: "run.submit", command_id: "submit", session_id: sessionId, content: "Inspect the fixture" });
+  const run = await store.execute({ type: "run.submit", command_id: "submit", session_id: sessionId, content: "Inspect the fixture", approval_mode: options.approvalMode });
   const runId = run.run_id!;
   const input = (type: EventInput["type"], data: unknown) => parseEventInput({ schema_version: 1, session_id: sessionId, recorded_at: new Date().toISOString(), type, data });
   const correlation = { run_id: runId, step: 1, request_id: "request", attempt: 1 };
@@ -116,6 +116,23 @@ describe("file tool service", () => {
     expect(await f.advance()).toEqual(first);
     expect(await readFile(target, "utf8")).toBe("later user edit");
     expect((await f.store.read(f.sessionId)).filter((event) => event.type === "tool.started")).toHaveLength(1);
+  });
+
+  it("applies persisted workspace-write and full-access policy without weakening manual shell approval", async () => {
+    const workspace = await fixture(undefined, undefined, { approvalMode: "workspace_write" });
+    expect(finished(await workspace.advance()).data.status).toBe("succeeded");
+    expect(await readFile(join(workspace.root, "target.txt"), "utf8")).toBe("after\n");
+    expect((await workspace.store.read(workspace.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
+
+    const guardedShell = await fixture("shell", { command: "printf workspace" }, { approvalMode: "workspace_write" }, [], ToolService);
+    expect(await guardedShell.advance()).toMatchObject({ status: "waiting_for_approval" });
+    expect((await guardedShell.store.read(guardedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(1);
+
+    const fullShell = await fixture("shell", { command: "printf full" }, { approvalMode: "full_access" }, [], ToolService);
+    expect(finished(await fullShell.advance()).data).toMatchObject({ status: "succeeded", result: { stdout: { text: "full" } } });
+    const fullEvents = await fullShell.store.read(fullShell.sessionId);
+    expect(fullEvents.find((event) => event.type === "run.started")?.data).toMatchObject({ approval_mode: "full_access" });
+    expect(fullEvents.filter((event) => event.type === "approval.requested")).toHaveLength(0);
   });
 
   it.each(["deny", "pending_cancel", "allowed_cancel", "expire"])("does not dispatch or change a file after %s", async (action) => {

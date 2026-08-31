@@ -108,19 +108,34 @@ async function childResult(source: string): Promise<{ child: ChildProcess; resul
 }
 
 describe("SQLite worker store", () => {
+  it("persists an explicit per-run approval mode and defaults omitted commands to manual", async () => {
+    const path = await databasePath(); const store = createStore(); await store.open(path);
+    const explicitSession = await createSession(store, path, "create-explicit");
+    const explicit = await store.execute({ type: "run.submit", session_id: explicitSession.session_id, command_id: "submit-explicit", content: "Edit", approval_mode: "workspace_write" });
+    const explicitEvents = await store.read(explicitSession.session_id);
+    expect(explicitEvents.find((event) => event.type === "run.started")?.data).toMatchObject({ run_id: explicit.run_id, approval_mode: "workspace_write" });
+    expect(replay(explicitEvents).runs.get(explicit.run_id!)?.approvalMode).toBe("workspace_write");
+
+    const legacySession = await createSession(store, path, "create-legacy");
+    const legacy = await store.execute({ type: "run.submit", session_id: legacySession.session_id, command_id: "submit-legacy", content: "Inspect" });
+    const legacyEvents = await store.read(legacySession.session_id);
+    expect(legacyEvents.find((event) => event.type === "run.started")?.data).toMatchObject({ run_id: legacy.run_id, approval_mode: "manual" });
+  });
+
   it("lists authoritative session activity after recovery without mutating history, and validates page bounds", async () => {
     const path = await databasePath(); const store = createStore(); await store.open(path);
     expect(await store.listSessions()).toEqual({ sessions: [], next_after: null });
     const session = await createSession(store, path);
+    expect(await store.getSession(session.session_id)).toMatchObject({ title: "新会话" });
     await store.execute({ type: "run.submit", session_id: session.session_id, command_id: "submit", content: "Inspect" });
     const live = await store.listSessions();
-    expect(live.sessions[0]).toMatchObject({ session_id: session.session_id, activity: "running", last_seq: 3 });
+    expect(live.sessions[0]).toMatchObject({ session_id: session.session_id, title: "Inspect", activity: "running", last_seq: 3, updated_at: expect.any(String) });
     for (const limit of [0, 201, 1.5]) await expect(store.listSessions({ limit })).rejects.toThrow();
     await expect(store.listSessions({ after: "" })).rejects.toThrow();
     await store.close(); const reader = createStore(); await reader.open(path);
     const saved = await reader.read(session.session_id);
     expect((await reader.listSessions()).sessions).toEqual([await reader.getSession(session.session_id)]);
-    expect((await reader.listSessions()).sessions[0]).toMatchObject({ activity: "idle", active_run_id: null, last_seq: 4 });
+    expect((await reader.listSessions()).sessions[0]).toMatchObject({ title: "Inspect", activity: "idle", active_run_id: null, last_seq: 4 });
     expect(await reader.listSessions({ after: session.session_id })).toEqual({ sessions: [], next_after: null });
     expect(await reader.read(session.session_id)).toEqual(saved);
   });

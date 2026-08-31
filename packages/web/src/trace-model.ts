@@ -1,5 +1,5 @@
 import type {
-  ApprovalStatus, Event, ExecutionError, Evidence, JsonValue, ModelOutput, ModelRequestContext,
+  ApprovalMode, ApprovalStatus, Event, ExecutionError, Evidence, JsonValue, ModelOutput, ModelRequestContext,
   RequestStatus, RunStatus, StepStatus, Timing, ToolStatus, Usage
 } from "@fosil/contracts";
 import { EventSequenceError } from "./chat-model.js";
@@ -73,6 +73,19 @@ export interface ApprovalTraceRecord extends TraceRecordBase {
 
 export type TraceRecord = ModelTraceRecord | ToolTraceRecord | ApprovalTraceRecord;
 
+export interface UserTraceItem {
+  kind: "user";
+  id: string;
+  runId: string;
+  commandId: string;
+  approvalMode: ApprovalMode;
+  content: string;
+  startedSeq: number;
+  recordedAt: string;
+}
+
+export type TraceTimelineItem = UserTraceItem | TraceRecord;
+
 export interface TraceStep {
   step: number;
   status: StepStatus;
@@ -86,6 +99,7 @@ export interface TraceStep {
 export interface TraceRun {
   runId: string;
   commandId: string;
+  approvalMode: ApprovalMode;
   prompt: string;
   status: RunStatus;
   reason: string | null;
@@ -100,6 +114,7 @@ export interface TraceProjection {
   sessionId: string | null;
   runs: TraceRun[];
   records: TraceRecord[];
+  timeline: TraceTimelineItem[];
   lastSeq: number;
 }
 
@@ -126,10 +141,15 @@ export function traceRecordHasError(record: TraceRecord): boolean {
   return ["denied", "expired", "cancelled"].includes(record.status);
 }
 
+export function traceTimelineItemHasError(item: TraceTimelineItem): boolean {
+  return item.kind !== "user" && traceRecordHasError(item);
+}
+
 export function projectTrace(events: readonly Event[]): TraceProjection {
   const runs = new Map<string, TraceRun>();
   const steps = new Map<string, TraceStep>();
   const records = new Map<string, TraceRecord>();
+  const timeline: TraceTimelineItem[] = [];
   const run = (runId: string) => {
     const found = runs.get(runId);
     if (!found) throw new EventSequenceError(`Trace event references unknown run ${runId}`);
@@ -149,9 +169,13 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
     switch (event.type) {
       case "session.created": break;
       case "run.started":
-        runs.set(event.data.run_id, { runId: event.data.run_id, commandId: event.data.command_id, prompt: "", status: "running", reason: null, startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null, steps: [] });
+        runs.set(event.data.run_id, { runId: event.data.run_id, commandId: event.data.command_id, approvalMode: event.data.approval_mode ?? "manual", prompt: "", status: "running", reason: null, startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null, steps: [] });
         break;
-      case "user.message": run(event.data.run_id).prompt = event.data.content; break;
+      case "user.message": {
+        run(event.data.run_id).prompt = event.data.content;
+        timeline.push({ kind: "user", id: `user:${event.data.run_id}:${event.seq}`, runId: event.data.run_id, commandId: event.data.command_id, approvalMode: run(event.data.run_id).approvalMode, content: event.data.content, startedSeq: event.seq, recordedAt: event.recorded_at });
+        break;
+      }
       case "step.started": {
         const current: TraceStep = { step: event.data.step, status: "running", reason: null, startedSeq: event.seq, finishedSeq: null, finishedAt: null, records: [] };
         steps.set(`${event.data.run_id}:${event.data.step}`, current); run(event.data.run_id).steps.push(current); break;
@@ -163,7 +187,7 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
           request: event.data.request, deltas: [], output: null, stopReason: null, usage: null, timings: null,
           error: null, origin: event.data.origin, startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null
         };
-        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); break;
+        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); timeline.push(current); break;
       }
       case "model.response.delta": record<ModelTraceRecord>(`model:${event.data.request_id}`, "model").deltas.push(event.data.delta); break;
       case "model.request.finished": {
@@ -181,7 +205,7 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
           reason: null, result: null, error: null, timings: null, exitCode: null, evidence: null, origin: event.data.origin,
           startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null
         };
-        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); break;
+        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); timeline.push(current); break;
       }
       case "approval.requested": {
         const current: ApprovalTraceRecord = {
@@ -191,7 +215,7 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
           policy: event.data.policy, expiresAt: event.data.expires_at, status: "pending", reason: null, origin: event.data.origin,
           resolvedAt: null, waitMs: null, startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null
         };
-        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); break;
+        records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); timeline.push(current); break;
       }
       case "approval.resolved": {
         const current = record<ApprovalTraceRecord>(`approval:${event.data.approval_id}`, "approval");
@@ -218,5 +242,5 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
       }
     }
   }
-  return { sessionId: events.at(0)?.session_id ?? null, runs: [...runs.values()], records: [...records.values()], lastSeq: events.at(-1)?.seq ?? 0 };
+  return { sessionId: events.at(0)?.session_id ?? null, runs: [...runs.values()], records: [...records.values()], timeline: timeline.sort((left, right) => left.startedSeq - right.startedSeq), lastSeq: events.at(-1)?.seq ?? 0 };
 }

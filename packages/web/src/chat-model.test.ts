@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { eventSchema, type Event } from "@fosil/contracts";
-import { appendCanonicalEvent, EventSequenceError, projectChat } from "./chat-model.js";
+import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun } from "./chat-model.js";
 
 const recorded_at = "2026-08-29T00:00:00.000Z";
-const usage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
+const usage = { input_tokens: 100, output_tokens: 20, total_tokens: 120, cache_read_tokens: 40, cache_write_tokens: 0 };
 const timings = { first_content_ms: 1, duration_ms: 2 };
 const base = { run_id: "run", step: 1, request_id: "request", attempt: 1 };
 const event = (seq: number, type: Event["type"], data: unknown): Event => eventSchema.parse({ schema_version: 1, session_id: "session", seq, recorded_at, type, data });
@@ -25,7 +25,8 @@ function history(): Event[] {
 describe("Chat event projection", () => {
   it("uses final model output instead of duplicating deltas and exposes only unresolved approvals", () => {
     const pending = projectChat(history());
-    expect(pending.runs[0]).toMatchObject({ userContent: "Change it", status: "waiting_for_approval", assistants: [{ text: "final", status: "succeeded" }], tools: [{ status: "waiting_for_approval" }] });
+    expect(pending.runs[0]).toMatchObject({ approvalMode: "manual", userContent: "Change it", status: "waiting_for_approval", assistants: [{ text: "final", status: "succeeded" }], tools: [{ status: "waiting_for_approval" }] });
+    expect(summarizeChatRun(pending.runs[0]!)).toMatchObject({ steps: 1, modelCalls: 1, toolCalls: 1, llmDurationMs: 2, toolDurationMs: null, averageFirstTokenMs: 1, cacheHitRate: .4, inputTokens: 100, outputTokens: 20 });
     expect(pending.pendingApprovals).toHaveLength(1);
     const settled = projectChat([...history(),
       event(10, "approval.resolved", { ...base, call_id: "call", approval_id: "approval", status: "allowed", reason: "completed", origin: "user" }),
@@ -34,7 +35,24 @@ describe("Chat event projection", () => {
       event(13, "step.finished", { run_id: "run", step: 1, status: "completed", reason: "completed", origin: "runner" }),
       event(14, "run.finished", { run_id: "run", status: "completed", reason: "completed", origin: "runner" })]);
     expect(settled.pendingApprovals).toEqual([]);
-    expect(settled.runs[0]).toMatchObject({ status: "completed", tools: [{ status: "succeeded" }] });
+    expect(settled.runs[0]).toMatchObject({ status: "completed", tools: [{ step: 1, status: "succeeded", result: { stdout: "" }, error: null }] });
+  });
+
+  it("keeps assistants and tool results interleaved in their durable step order", () => {
+    const second = { run_id: "run", step: 2, request_id: "request-2", attempt: 1 };
+    const projected = projectChat([...history(),
+      event(10, "approval.resolved", { ...base, call_id: "call", approval_id: "approval", status: "allowed", reason: "completed", origin: "user" }),
+      event(11, "tool.started", { ...base, call_id: "call", approval_id: "approval", tool_name: "shell", arguments: { command: "printf x" }, cwd: "/tmp/project", origin: "runner" }),
+      event(12, "tool.finished", { ...base, call_id: "call", approval_id: "approval", tool_name: "shell", cwd: "/tmp/project", status: "succeeded", reason: "completed", result: { stdout: "x" }, error: null, timings, exit_code: 0, evidence: { kind: "command", data: null }, origin: "runner" }),
+      event(13, "step.finished", { run_id: "run", step: 1, status: "completed", reason: "completed", origin: "runner" }),
+      event(14, "step.started", { run_id: "run", step: 2 }),
+      event(15, "model.request.started", { ...second, request: { provider: "controlled", model: "fixture", system_instructions: [], messages: [], tools: [], settings: { temperature: null, top_p: null, max_output_tokens: null } }, origin: "runner" }),
+      event(16, "model.request.finished", { ...second, status: "succeeded", reason: "completed", output: { text: "After tool", reasoning: null, tool_calls: [] }, stop_reason: "stop", usage, timings, error: null, origin: "provider" })
+    ]);
+    expect(projected.runs[0]!.activities.map((activity) => activity.kind === "assistant"
+      ? `assistant:${activity.assistant.step}` : `tool:${activity.tool.step}:${String((activity.tool.result as { stdout: string }).stdout)}`))
+      .toEqual(["assistant:1", "tool:1:x", "assistant:2"]);
+    expect(summarizeChatRun(projected.runs[0]!)).toEqual({ steps: 2, modelCalls: 2, toolCalls: 1, llmDurationMs: 4, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 200, outputTokens: 40 });
   });
 
   it("deduplicates an identical delivery and rejects gaps, conflicts, and cross-session events", () => {

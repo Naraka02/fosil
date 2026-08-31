@@ -2,7 +2,7 @@ import {
   parseEvent,
   type Event, type EventReason, type RunStatus, type StepStatus, type RequestStatus,
   type ToolStatus, type ApprovalStatus, type ModelRequestContext, type ModelOutput,
-  type Usage, type Timing, type JsonValue, type ExecutionError, type Evidence
+  type Usage, type Timing, type JsonValue, type ExecutionError, type Evidence, type ApprovalMode
 } from "@fosil/contracts";
 
 export { parseEvent, parseEventInput, sessionCreatedEventInputSchema } from "@fosil/contracts";
@@ -83,6 +83,7 @@ export interface CompactionState {
 export interface RunState {
   readonly runId: string;
   readonly commandId: string;
+  readonly approvalMode: ApprovalMode;
   readonly status: RunStatus;
   readonly reason: EventReason | null;
   readonly blockedReason: EventReason | null;
@@ -232,7 +233,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     requireFact(![...previous.runs.values()].some((run) => run.commandId === event.data.command_id),
       "duplicate-command", "one accepted command cannot start two runs");
     return replaceRun(previous, {
-      runId: event.data.run_id, commandId: event.data.command_id, status: "running", reason: null,
+      runId: event.data.run_id, commandId: event.data.command_id, approvalMode: event.data.approval_mode ?? "manual", status: "running", reason: null,
       blockedReason: null, cancelRequested: false, userMessage: null, activeStep: null,
       activeRequestId: null, activeToolId: null, activeCompactionId: null, compactionIds: [],
       steps: new Map(), requests: new Map(), tools: new Map(), approvals: new Map()

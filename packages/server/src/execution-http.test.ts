@@ -5,7 +5,7 @@ import { request as httpRequest, type ClientRequest, type IncomingMessage } from
 import { connect, type Socket } from "node:net";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { commandAckSchema, historyPageSchema, sessionListSchema, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest } from "@fosil/contracts";
+import { commandAckSchema, directoryListingSchema, historyPageSchema, sessionListSchema, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest } from "@fosil/contracts";
 import { replay } from "@fosil/core";
 import { ExecutionHttpServer, type ExecutionHttpOptions } from "./execution-http.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
@@ -90,6 +90,22 @@ async function stream(origin: string, sessionId: string, after = "0", headers: R
 }
 
 describe("execution HTTP commands and reads", () => {
+  it("lists local workspace directories without exposing files or poisoning the service on an unavailable path", async () => {
+    const f = await fixture();
+    await Promise.all([mkdir(join(f.root, "project-b")), mkdir(join(f.root, "project-a")), writeFile(join(f.root, "private.txt"), "secret")]);
+    const response = await fetch(f.origin + `/api/workspaces/directories?path=${encodeURIComponent(f.root)}`);
+    expect(response.status).toBe(200);
+    expect(directoryListingSchema.parse(await response.json())).toMatchObject({
+      path: f.root,
+      directories: [
+        { name: "project-a", path: join(f.root, "project-a") },
+        { name: "project-b", path: join(f.root, "project-b") }
+      ]
+    });
+    expect((await fetch(f.origin + `/api/workspaces/directories?path=${encodeURIComponent(join(f.root, "private.txt"))}`)).status).toBe(400);
+    expect(await (await fetch(f.origin + "/api/status")).json()).toMatchObject({ status: "ready" });
+  });
+
   it("projects bounded browser fields in history and SSE while retaining the full canonical event", async () => {
     const f = await fixture();
     const { session_id } = await f.create();
@@ -291,7 +307,7 @@ describe("execution HTTP trust boundary", () => {
       { host }, { host, origin: "null" }, { host, origin: f.origin, "sec-fetch-site": "cross-site" },
       { host, origin: f.origin, "sec-fetch-site": "same-site" }, { host, origin: [f.origin, f.origin] }
     ]) expect((await raw(f.origin, "/api/commands", { ...headers, "content-type": "application/json" }, "POST", command)).status).toBe(403);
-    for (const path of ["/api/status", "/api/sessions", "/api/sessions/unknown/history", "/api/sessions/unknown/events?after=0"]) {
+    for (const path of ["/api/status", "/api/workspaces/directories", "/api/sessions", "/api/sessions/unknown/history", "/api/sessions/unknown/events?after=0"]) {
       expect((await raw(f.origin, path, { host: "attacker.invalid" })).status).toBe(403);
       expect((await raw(f.origin, path, { host, origin: "http://attacker.invalid" })).status).toBe(403);
     }
@@ -375,7 +391,7 @@ describe("durable event SSE", () => {
     const s = await stream(f.origin, session_id);
     await until(() => s.response.destroyed);
     expect(s.events).toEqual([]);
-    expect((await (await fetch(f.origin + "/api/status")).json()).status).toBe("ready");
+    expect(await (await fetch(f.origin + "/api/status")).json()).toEqual({ status: "ready", model: "fixture" });
     expect((await f.store.read(session_id))).toHaveLength(1);
   });
 

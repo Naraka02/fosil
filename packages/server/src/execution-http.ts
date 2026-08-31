@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import {
-  commandSchema, historyPageRequestSchema, historyPageSchema, historyQuerySchema, sequenceTextSchema, sessionListQuerySchema,
-  sessionParamsSchema, streamQuerySchema, type Command, type CommandAck
+  commandSchema, directoryListingQuerySchema, directoryListingSchema, historyPageRequestSchema, historyPageSchema, historyQuerySchema,
+  sequenceTextSchema, sessionListQuerySchema, sessionParamsSchema, streamQuerySchema, type Command, type CommandAck
 } from "@fosil/contracts";
 import { AgentLoopService, type AgentLoopOptions } from "./agent-loop.js";
+import { listLocalDirectories, LocalDirectoryError } from "./local-directories.js";
 import { SqliteWorkerStore, StoreError } from "./store.js";
 import { StreamStopped, streamPause, writeSseFrame } from "./sse.js";
 import { browserEventPreview } from "./browser-preview.js";
@@ -42,6 +43,7 @@ export class ExecutionHttpServer {
   private readonly store: SqliteWorkerStore;
   private readonly limits;
   private readonly webRoot: string | undefined;
+  private readonly model: string;
   private authority: string | undefined;
   private phase: "ready" | "failed" | "stopping" = "ready";
   private readonly commands = new Set<Promise<CommandAck>>();
@@ -59,6 +61,7 @@ export class ExecutionHttpServer {
       if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) throw new StoreError("invalid_options", "HTTP limits must be positive 32-bit integers");
     }
     this.webRoot = this.resolveWebRoot(options.webRoot);
+    this.model = options.loop.model;
     this.store = options.store;
     // Construction requires a store that has completed its recovery barrier.
     void this.store.protectedFiles;
@@ -106,7 +109,15 @@ export class ExecutionHttpServer {
         return this.staticFile(reply, join("assets", name), type);
       });
     }
-    this.app.get("/api/status", async () => ({ status: this.phase }));
+    this.app.get("/api/status", async () => ({ status: this.phase, model: this.model }));
+    this.app.get("/api/workspaces/directories", async (request) => {
+      const query = parse(directoryListingQuerySchema, request.query);
+      try { return directoryListingSchema.parse(await listLocalDirectories(query.path)); }
+      catch (error) {
+        if (error instanceof LocalDirectoryError) throw new HttpError(400, "directory_unavailable", "Directory is unavailable");
+        throw error;
+      }
+    });
     this.app.post("/api/commands", async (request) => this.execute(parse(commandSchema, request.body)));
     this.app.get("/api/sessions", async (request) => {
       const query = parse(sessionListQuerySchema, request.query);

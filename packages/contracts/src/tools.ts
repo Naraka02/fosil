@@ -17,7 +17,7 @@ export function parseToolInvocation(value: unknown): ToolInvocation { return too
 export function toolRequiresApproval(name: string): boolean { return name === "shell" || fileToolRequiresApproval(name); }
 export function toolDefinitions() {
   return [...fileToolDefinitions(), {
-    name: "shell", description: "Run a non-interactive shell command in the workspace with bounded output and a deadline; always requires approval. The command can affect the host outside the workspace.",
+    name: "shell", description: "Run a non-interactive shell command in the workspace with bounded output and a deadline. Manual and workspace-write modes require approval because the command can affect the host outside the workspace.",
     parameters: z.toJSONSchema(shellArguments)
   }];
 }

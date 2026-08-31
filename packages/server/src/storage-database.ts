@@ -4,6 +4,7 @@ import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { commandAckSchema, contentMetadataSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type ContentMetadata, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
 import { applyEvent, planRecovery, replay, workspaceBlockers, type ExecutionState } from "@fosil/core";
+import { deriveSessionTitle } from "./session-title.js";
 import { StoreError, type RecoveryReport, type SessionSummary } from "./storage-protocol.js";
 
 const schema = `
@@ -44,9 +45,18 @@ function canonicalDatabasePath(path: string): string {
   }
 }
 
-function summary(state: ExecutionState): SessionSummary | null {
+type SessionIndex = Omit<SessionSummary, "title">;
+
+function sessionIndex(state: ExecutionState, updatedAt: string | undefined): SessionIndex | null {
   if (!state.workspaceRoot || !state.sessionId) return null;
-  return { session_id: state.sessionId, workspace_root: state.workspaceRoot, last_seq: state.lastSeq, active_run_id: state.activeRunId, activity: state.activity };
+  if (!updatedAt) throw new Error("Session history has no latest event timestamp");
+  return { session_id: state.sessionId, workspace_root: state.workspaceRoot, last_seq: state.lastSeq,
+    active_run_id: state.activeRunId, activity: state.activity, updated_at: updatedAt };
+}
+
+function summary(state: ExecutionState, events: readonly Event[]): SessionSummary | null {
+  const index = sessionIndex(state, events.at(-1)?.recorded_at);
+  return index ? { ...index, title: deriveSessionTitle(events) } : null;
 }
 
 type EventRow = { session_id: string; seq: number; schema_version: number; type: string; recorded_at: string; data_json: string | null };
@@ -122,7 +132,10 @@ export class StorageDatabase {
   read(sessionId: string): Event[] { return this.db.transaction(() => this.load(sessionId).events)(); }
 
   getSession(sessionId: string): SessionSummary | null {
-    return this.db.transaction(() => summary(this.load(sessionId).state))();
+    return this.db.transaction(() => {
+      const loaded = this.load(sessionId);
+      return summary(loaded.state, loaded.events);
+    })();
   }
 
   listSessions(raw: unknown): SessionList {
@@ -130,7 +143,10 @@ export class StorageDatabase {
     return this.db.transaction(() => {
       const rows = this.db.prepare("SELECT session_id FROM sessions WHERE session_id > ? ORDER BY session_id LIMIT ?")
         .all(request.after ?? "", request.limit + 1) as { session_id: string }[];
-      const sessions = rows.slice(0, request.limit).map((row) => summary(this.load(row.session_id).state));
+      const sessions = rows.slice(0, request.limit).map((row) => {
+        const loaded = this.load(row.session_id);
+        return summary(loaded.state, loaded.events);
+      });
       return sessionListSchema.parse({ sessions, next_after: rows.length > request.limit ? rows[request.limit - 1]!.session_id : null });
     })();
   }
@@ -202,7 +218,7 @@ export class StorageDatabase {
           if (state.activeRunId !== null) throw new StoreError("session_busy", "Session already has an active run");
           runId = randomUUID();
           inputs = [
-            { ...envelope, type: "run.started", data: { run_id: runId, command_id: command.command_id, origin: "user" } },
+            { ...envelope, type: "run.started", data: { run_id: runId, command_id: command.command_id, approval_mode: command.approval_mode ?? "manual", origin: "user" } },
             { ...envelope, type: "user.message", data: { run_id: runId, command_id: command.command_id, content: command.content, origin: "user" },
               ...(contentMetadata?.length ? { content_metadata: contentMetadata } : {}) }
           ];
@@ -276,8 +292,10 @@ export class StorageDatabase {
     try {
       const events = hydrate(rows);
       const state = replay(events, sessionId);
-      const index = this.db.prepare("SELECT session_id, workspace_root, last_seq, active_run_id, activity FROM sessions WHERE session_id = ?").get(sessionId) as SessionSummary | undefined;
-      if (JSON.stringify(index ?? null) !== JSON.stringify(summary(state))) throw new Error("Session index disagrees with event history");
+      const index = this.db.prepare(`SELECT s.session_id, s.workspace_root, s.last_seq, s.active_run_id, s.activity,
+        (SELECT recorded_at FROM events WHERE session_id = s.session_id ORDER BY seq DESC LIMIT 1) AS updated_at
+        FROM sessions s WHERE s.session_id = ?`).get(sessionId) as SessionIndex | undefined;
+      if (JSON.stringify(index ?? null) !== JSON.stringify(sessionIndex(state, events.at(-1)?.recorded_at))) throw new Error("Session index disagrees with event history");
       return { events, state };
     } catch (error) {
       throw new StoreError("corrupt_history", error instanceof Error ? error.message : "Invalid stored history");
@@ -296,7 +314,7 @@ export class StorageDatabase {
       }
       const event = parseEvent({ ...input, seq: previous.lastSeq + 1 });
       const state = applyEvent(previous, event);
-      const row = summary(state)!;
+      const row = sessionIndex(state, event.recorded_at)!;
       this.db.prepare(`INSERT INTO sessions (session_id, workspace_root, last_seq, active_run_id, activity) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET last_seq = excluded.last_seq, active_run_id = excluded.active_run_id, activity = excluded.activity`)
         .run(row.session_id, row.workspace_root, row.last_seq, row.active_run_id, row.activity);

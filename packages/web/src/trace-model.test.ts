@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eventSchema, type Event } from "@fosil/contracts";
-import { payloadFlags, projectTrace, traceRecordHasError } from "./trace-model.js";
+import { payloadFlags, projectTrace, traceRecordHasError, traceTimelineItemHasError } from "./trace-model.js";
 
 const at = (second: number) => `2026-08-29T00:00:${String(second).padStart(2, "0")}.000Z`;
 const event = (seq: number, type: Event["type"], data: unknown, second = seq): Event => eventSchema.parse({ schema_version: 1, session_id: "session", seq, recorded_at: at(second), type, data });
@@ -11,7 +11,7 @@ const request = { provider: "controlled", model: "fixture", system_instructions:
 function history(): Event[] {
   return [
     event(1, "session.created", { workspace_root: "/tmp/project", created_by: "user" }),
-    event(2, "run.started", { run_id: "run", command_id: "submit", origin: "user" }),
+    event(2, "run.started", { run_id: "run", command_id: "submit", approval_mode: "workspace_write", origin: "user" }),
     event(3, "user.message", { run_id: "run", command_id: "submit", content: "Edit", origin: "user" }),
     event(4, "step.started", { run_id: "run", step: 1 }),
     event(5, "model.request.started", { ...correlation, request, origin: "runner" }),
@@ -31,13 +31,16 @@ describe("Trace projection", () => {
   it("correlates one record per operation and keeps final output separate from stream evidence", () => {
     const trace = projectTrace(history());
     expect(trace.sessionId).toBe("session"); expect(trace.runs).toHaveLength(1); expect(trace.records).toHaveLength(3);
+    expect(trace.timeline.map((item) => item.kind)).toEqual(["user", "model", "tool", "approval"]);
+    expect(trace.timeline.map((item) => item.startedSeq)).toEqual([3, 5, 8, 9]);
+    expect(trace.timeline[0]).toMatchObject({ kind: "user", content: "Edit", commandId: "submit", approvalMode: "workspace_write", recordedAt: at(3) });
     const model = trace.records.find((record) => record.kind === "model")!;
     expect(model).toMatchObject({ id: "model:request", requestId: "request", status: "succeeded", request, output: { text: "final" }, deltas: [{ kind: "text", text: "final" }], usage });
     const tool = trace.records.find((record) => record.kind === "tool")!;
     expect(tool).toMatchObject({ id: "tool:call", requestId: "request", callId: "call", status: "succeeded", evidence: { kind: "file_change", data: { diff: "--- a/target.txt\n+++ b/target.txt\n" } } });
     const approval = trace.records.find((record) => record.kind === "approval")!;
     expect(approval).toMatchObject({ id: "approval:approval", callId: "call", status: "allowed", waitMs: 2000, finishedAt: at(12) });
-    expect(trace.runs[0]).toMatchObject({ reason: "completed", finishedAt: at(14), steps: [{ reason: "completed", finishedAt: at(13) }] });
+    expect(trace.runs[0]).toMatchObject({ approvalMode: "workspace_write", reason: "completed", finishedAt: at(14), steps: [{ reason: "completed", finishedAt: at(13) }] });
     expect(projectTrace(history())).toEqual(trace);
   });
 
@@ -52,5 +55,7 @@ describe("Trace projection", () => {
     expect(traceRecordHasError({ ...tool, status: "interrupted", evidence: { kind: "unknown", data: null } })).toBe(true);
     const approval = trace.records.find((record) => record.kind === "approval")!;
     expect(traceRecordHasError({ ...approval, status: "denied" })).toBe(true);
+    expect(traceTimelineItemHasError(trace.timeline[0]!)).toBe(false);
+    expect(traceTimelineItemHasError({ ...approval, status: "denied" })).toBe(true);
   });
 });

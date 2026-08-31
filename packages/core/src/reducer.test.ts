@@ -82,6 +82,19 @@ function toolResult(overrides: Record<string, unknown> = {}) {
 }
 
 describe("execution reducer", () => {
+  it("projects the persisted approval mode and defaults legacy run starts to manual", () => {
+    const legacy = sequence();
+    expect(build(baseRun(legacy)).runs.get("run-1")?.approvalMode).toBe("manual");
+
+    const explicit = sequence();
+    const events = [
+      explicit.next("session.created", { workspace_root: "/tmp/fixture", created_by: "user" }),
+      explicit.next("run.started", { run_id: "run-1", command_id: "run-1-command", approval_mode: "workspace_write", origin: "user" }),
+      explicit.next("user.message", { run_id: "run-1", command_id: "run-1-command", content: "inspect", origin: "user" })
+    ];
+    expect(build(events).runs.get("run-1")?.approvalMode).toBe("workspace_write");
+  });
+
   it("recovers every committed prefix without mutating facts or repeating terminal events", () => {
     const { s, events } = gatedPrefix();
     events.push(s.next("approval.resolved", { ...callLink, status: "allowed", reason: "completed", origin: "user" }));

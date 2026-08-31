@@ -1,10 +1,10 @@
 import {
-  apiErrorSchema, commandAckSchema, eventSchema, historyPageSchema, serviceStatusSchema, sessionListSchema,
-  type Command, type CommandAck, type Event, type SessionList, type SessionSummary
+  apiErrorSchema, commandAckSchema, directoryListingSchema, eventSchema, historyPageSchema, serviceStatusSchema, sessionListSchema,
+  type Command, type CommandAck, type DirectoryListing, type Event, type ServiceStatus, type SessionList, type SessionSummary
 } from "@fosil/contracts";
 import { appendCanonicalEvent } from "./chat-model.js";
 
-export interface ServiceStatus { status: "ready" | "failed" | "stopping" }
+export type { ServiceStatus } from "@fosil/contracts";
 
 export class CommandDeliveryError extends Error {
   constructor(message: string, readonly uncertain: boolean) { super(message); }
@@ -26,6 +26,11 @@ async function get<T>(path: string, schema: { parse(value: unknown): T }, signal
 
 export async function loadServiceStatus(signal?: AbortSignal): Promise<ServiceStatus> {
   return get("/api/status", serviceStatusSchema, signal);
+}
+
+export async function loadDirectories(path?: string, signal?: AbortSignal): Promise<DirectoryListing> {
+  const query = path === undefined ? "" : `?path=${encodeURIComponent(path)}`;
+  return get(`/api/workspaces/directories${query}`, directoryListingSchema, signal);
 }
 
 export async function loadSessions(signal?: AbortSignal): Promise<SessionSummary[]> {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { toolRequiresApproval, parseEventInput, parseToolInvocation, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
+import { toolRequiresApproval, parseEventInput, parseToolInvocation, type ApprovalMode, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
 import { replay, type RunState, type ToolState } from "@fosil/core";
 import { executeFileTool, FileToolError, ToolCancelled } from "./file-tools.js";
 import { executeShellTool } from "./shell-tools.js";
@@ -41,7 +41,7 @@ export class ToolService {
         throw new StoreError("wrong_correlation", "Only the next complete model tool call can be prepared");
       }
       const callId = randomUUID();
-      const gated = this.requiresApproval(declared.name);
+      const gated = this.requiresApproval(declared.name, run.approvalMode);
       await this.store.append(this.input(sessionId, "tool.call.created", {
         run_id: runId, step: step.step, request_id: request.requestId, attempt: request.attempt,
         call_id: callId, provider_call_id: providerCallId, tool_name: declared.name, arguments: declared.arguments,
@@ -70,7 +70,7 @@ export class ToolService {
     if (call.started) return { status: "in_progress", callId };
     if (state.activeRunId !== runId) throw new StoreError("inactive_run", "Run is no longer active");
     if ([...run.tools.values()].find(unsettled)?.callId !== callId) throw new StoreError("tool_order", "An earlier tool call must settle first");
-    if (call.cwd !== state.workspaceRoot || call.requiresApproval !== this.requiresApproval(call.toolName)) {
+    if (call.cwd !== state.workspaceRoot || call.requiresApproval !== this.requiresApproval(call.toolName, run.approvalMode)) {
       throw new StoreError("policy_mismatch", "Recorded call does not match the tool policy or workspace");
     }
     const common = { run_id: runId, step: call.step, request_id: call.requestId, attempt: call.attempt, call_id: callId, approval_id: call.approvalId };
@@ -161,7 +161,11 @@ export class ToolService {
   }
 
   protected parseInvocation(value: unknown): ToolInvocation { return parseToolInvocation(value); }
-  protected requiresApproval(name: string): boolean { return toolRequiresApproval(name); }
+  protected requiresApproval(name: string, mode: ApprovalMode): boolean {
+    if (mode === "full_access") return false;
+    if (mode === "workspace_write") return name === "shell";
+    return toolRequiresApproval(name);
+  }
 
   private checkService(signal?: AbortSignal): void {
     if (this.signal?.aborted) throw new StoreError("service_stopped", "Tool service stopped; live effects must settle before teardown");
