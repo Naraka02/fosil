@@ -147,7 +147,7 @@ describe("product Chat controls in a real browser", () => {
     await page.getByRole("button", { name: "在此创建会话", exact: true }).click();
     await page.locator(".session.active").waitFor();
     const approvalMode = () => page.getByRole("button", { name: /权限审批模式：/ });
-    expect(await approvalMode().getAttribute("aria-label")).toBe("权限审批模式：手动审批");
+    expect(await approvalMode().getAttribute("aria-label")).toBe("权限审批模式：Read Only");
     await approvalMode().click();
     await page.getByRole("menuitemradio", { name: /Workspace Write/ }).click();
     expect(await approvalMode().getAttribute("aria-label")).toBe("权限审批模式：Workspace Write");
@@ -161,7 +161,7 @@ describe("product Chat controls in a real browser", () => {
     await page.getByRole("button", { name: "启用 Full Access", exact: true }).click();
     expect(await approvalMode().getAttribute("aria-label")).toBe("权限审批模式：Full Access");
     await approvalMode().click();
-    await page.getByRole("menuitemradio", { name: /手动审批/ }).click();
+    await page.getByRole("menuitemradio", { name: /Read Only/ }).click();
     await page.setViewportSize({ width: 390, height: 844 });
     await approvalMode().click();
     await page.getByRole("menu", { name: "选择权限审批模式" }).waitFor();

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { Event } from "@fosil/contracts";
+import type { ApprovalMode, Event } from "@fosil/contracts";
 import {
   payloadFlags, projectTrace, traceTimelineItemHasError,
   type ApprovalTraceRecord, type ModelTraceRecord, type ToolTraceRecord, type TraceRecord, type TraceTimelineItem, type UserTraceItem
@@ -13,6 +13,7 @@ const label = (record: TraceRecord) => record.kind === "model" ? `助手 · ${re
 const status = (record: TraceRecord) => record.status;
 const time = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3, hour12: false });
 const compact = (value: string) => value.replace(/\s+/gu, " ").trim();
+const approvalModeLabel: Record<ApprovalMode, string> = { manual: "Read Only", workspace_write: "Workspace Write", full_access: "Full Access" };
 const timelineKind = (item: TraceTimelineItem) => item.kind === "model" ? "assistant" : item.kind;
 const timelinePreview = (item: TraceTimelineItem) => {
   if (item.kind === "user") return compact(item.content) || "空消息";
@@ -98,7 +99,7 @@ function RecordDetail({ record }: { record: TraceRecord }) {
 
 function UserDetail({ item }: { item: UserTraceItem }) {
   return <div className="trace-detail"><header><div><p className="eyebrow">已选记录</p><h2>用户消息</h2></div><span className="trace-saved">已保存</span></header>
-    <section className="trace-section"><h3>标识与顺序</h3><dl className="metric-grid"><div><dt>运行</dt><dd>{item.runId}</dd></div><div><dt>命令</dt><dd>{item.commandId}</dd></div><div><dt>权限模式</dt><dd>{item.approvalMode}</dd></div><div><dt>序列</dt><dd>{item.startedSeq}</dd></div><div><dt>记录时间</dt><dd>{item.recordedAt}</dd></div></dl></section>
+    <section className="trace-section"><h3>标识与顺序</h3><dl className="metric-grid"><div><dt>运行</dt><dd>{item.runId}</dd></div><div><dt>命令</dt><dd>{item.commandId}</dd></div><div><dt>权限模式</dt><dd>{approvalModeLabel[item.approvalMode]}</dd></div><div><dt>序列</dt><dd>{item.startedSeq}</dd></div><div><dt>记录时间</dt><dd>{item.recordedAt}</dd></div></dl></section>
     <section className="trace-section"><h3>消息</h3><p className="trace-user-content">{item.content}</p></section>
   </div>;
 }

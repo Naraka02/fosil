@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { toolRequiresApproval, parseEventInput, parseToolInvocation, type ApprovalMode, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
 import { replay, type RunState, type ToolState } from "@fosil/core";
 import { executeFileTool, FileToolError, ToolCancelled } from "../tools/file-tools.js";
-import { executeShellTool } from "../tools/shell-tools.js";
+import { executeShellTool, workspaceShellSandboxAvailable } from "../tools/shell-tools.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
 type Finished = Extract<Event, { type: "tool.finished" }>;
@@ -10,7 +10,7 @@ type FinishedData = Finished["data"];
 export type ToolAdvance = { status: "finished"; event: Finished }
   | { status: "waiting_for_approval"; approvalId: string; expiresAt: string }
   | { status: "in_progress"; callId: string };
-export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number; signal?: AbortSignal }
+export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number; signal?: AbortSignal; shellSandboxAvailable?: boolean }
 const unsettled = (tool: ToolState) => ["created", "waiting_for_approval", "running"].includes(tool.status);
 
 /** Trusted local service; callers cannot supply operation arguments, policy, or cwd. */
@@ -18,12 +18,14 @@ export class ToolService {
   private readonly now: () => Date;
   private readonly ttl: number;
   private readonly signal: AbortSignal | undefined;
+  private readonly shellSandboxAvailable: boolean;
   private readonly operations = new Map<string, Promise<unknown>>();
 
   constructor(private readonly store: SqliteWorkerStore, options: ToolServiceOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.ttl = options.approvalTtlMs ?? 300_000;
     this.signal = options.signal;
+    this.shellSandboxAvailable = options.shellSandboxAvailable ?? workspaceShellSandboxAvailable();
     if (!Number.isSafeInteger(this.ttl) || this.ttl < 1 || this.ttl > 86_400_000) throw new Error("Approval lifetime must be between 1 ms and 24 hours");
   }
 
@@ -138,7 +140,10 @@ export class ToolService {
           throw new StoreError("inactive_dispatch", "Dispatch is no longer active");
         }
       };
-      if (invocation.name === "shell") outcome = await executeShellTool(call.cwd, invocation, beforeEffect);
+      if (invocation.name === "shell") outcome = await executeShellTool(call.cwd, invocation, beforeEffect, {
+        fileMode: run.approvalMode === "workspace_write" && !call.requiresApproval ? "workspace_write" : "full_access",
+        protectedFiles
+      });
       else {
         const executed = await executeFileTool(call.cwd, invocation, protectedFiles, beforeEffect);
         outcome = { status: "succeeded", reason: "completed", ...executed };
@@ -163,7 +168,7 @@ export class ToolService {
   protected parseInvocation(value: unknown): ToolInvocation { return parseToolInvocation(value); }
   protected requiresApproval(name: string, mode: ApprovalMode): boolean {
     if (mode === "full_access") return false;
-    if (mode === "workspace_write") return name === "shell";
+    if (mode === "workspace_write") return name === "shell" && !this.shellSandboxAvailable;
     return toolRequiresApproval(name);
   }
 

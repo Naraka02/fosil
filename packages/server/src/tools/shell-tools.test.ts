@@ -1,9 +1,9 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseShellToolInvocation } from "@fosil/contracts";
-import { executeShellTool, type ShellToolExecution } from "./shell-tools.js";
+import { executeShellTool, type ShellToolExecution, type ShellToolOptions } from "./shell-tools.js";
 import { ToolCancelled } from "./file-tools.js";
 
 vi.mock("node:fs/promises", async (original) => ({ ...await original<typeof import("node:fs/promises")>() }));
@@ -24,13 +24,13 @@ async function program(root: string, code: string) {
   await writeFile(join(root, "fixture.cjs"), code);
   return `exec ${quote(process.execPath)} fixture.cjs`;
 }
-async function run(root: string, command: string, beforeEffect = async () => {}, timeout = 3000) {
-  return executeShellTool(root, parseShellToolInvocation({ name: "shell", arguments: { command, timeout_ms: timeout } }), beforeEffect);
+async function run(root: string, command: string, beforeEffect = async () => {}, timeout = 3000, options: ShellToolOptions = {}) {
+  return executeShellTool(root, parseShellToolInvocation({ name: "shell", arguments: { command, timeout_ms: timeout } }), beforeEffect, options);
 }
 interface Output { text: string; observed_bytes: number; retained_bytes: number; truncated: boolean; invalid_utf8: boolean; retained_utf8_replaced: boolean; complete: boolean }
 interface ProcessData { pid: number | null; process_group: number | null; session: number | null; start_time_ticks: string | null; leader_exited: boolean; user_command_released: boolean; signal: string | null; cleanup_signals: string[]; cleanup: string; observed_zombies: number; escaped_sessions_tracked: boolean }
 function result(value: ShellToolExecution) {
-  return value.result as unknown as { command: string; cwd: string; stdout: Output; stderr: Output; process: ProcessData };
+  return value.result as unknown as { command: string; cwd: string; file_sandbox: { mode: string; backend: string; enforcement: string }; stdout: Output; stderr: Output; process: ProcessData };
 }
 async function notRunning(pid: number) {
   try {
@@ -42,6 +42,26 @@ async function notRunning(pid: number) {
 }
 
 describe("bounded Linux shell executor", () => {
+  it("confines Workspace Write mutations and keeps protected workspace files read-only", async () => {
+    const root = await directory();
+    const outside = join(root, "..", `${root.split("/").at(-1)}-outside.txt`);
+    const temporary = join("/tmp", `${root.split("/").at(-1)}-temporary.txt`);
+    directories.push(outside, temporary);
+    const storeDirectory = join(root, ".fosil");
+    const protectedFile = join(storeDirectory, "events.db");
+    const protectedFutureFile = join(storeDirectory, "events.db-wal");
+    await mkdir(storeDirectory);
+    await writeFile(protectedFile, "protected");
+    const command = `printf inside > inside.txt; printf outside > ${quote(outside)} 2>/dev/null || true; printf changed > .fosil/events.db 2>/dev/null || true; printf created > .fosil/events.db-wal 2>/dev/null || true; printf temporary > ${quote(temporary)}`;
+    const value = await run(root, command, async () => {}, 3000, { fileMode: "workspace_write", protectedFiles: [protectedFile, protectedFutureFile] });
+    expect(value).toMatchObject({ status: "succeeded", result: { file_sandbox: { mode: "workspace_write", backend: "bubblewrap", enforcement: "partial" } } });
+    expect(await readFile(join(root, "inside.txt"), "utf8")).toBe("inside");
+    await expect(readFile(outside, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(protectedFile, "utf8")).toBe("protected");
+    await expect(readFile(protectedFutureFile, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(temporary, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("records separate outputs, explicit cwd, a closed stdin, and verified process identity", async () => {
     const root = await directory();
     const command = "printf 'hello\\n'; printf 'warning\\n' >&2; pwd; read answer || printf 'stdin-closed'";

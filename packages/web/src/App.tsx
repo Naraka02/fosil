@@ -23,11 +23,11 @@ const readApprovalMode = (): ApprovalMode => {
   return value === "workspace_write" || value === "full_access" ? value : "manual";
 };
 const approvalModeTitle: Record<ApprovalMode, string> = {
-  manual: "所有写入和 Shell 操作均逐次请求批准",
-  workspace_write: "自动允许工作区内的托管文件写入；Shell 仍需手动批准",
+  manual: "默认只读；文件写入和未隔离的 Shell 操作需逐次批准",
+  workspace_write: "允许工作区内写入，并在文件沙箱中自动运行 Shell；沙箱不可用时请求一次性非隔离批准",
   full_access: "自动允许所有受支持工具，包括可能影响工作区外部的 Shell 命令"
 };
-const approvalModeLabel: Record<ApprovalMode, string> = { manual: "手动审批", workspace_write: "Workspace Write", full_access: "Full Access" };
+const approvalModeLabel: Record<ApprovalMode, string> = { manual: "Read Only", workspace_write: "Workspace Write", full_access: "Full Access" };
 const approvalModes: ApprovalMode[] = ["manual", "workspace_write", "full_access"];
 const shortId = (value: string) => value.length > 10 ? value.slice(0, 8) : value;
 const commandId = () => crypto.randomUUID();

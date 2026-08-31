@@ -118,18 +118,29 @@ describe("file tool service", () => {
     expect((await f.store.read(f.sessionId)).filter((event) => event.type === "tool.started")).toHaveLength(1);
   });
 
-  it("applies persisted workspace-write and full-access policy without weakening manual shell approval", async () => {
+  it("applies persisted Workspace Write sandboxing, fallback approval, Full Access, and Read Only policy", async () => {
     const workspace = await fixture(undefined, undefined, { approvalMode: "workspace_write" });
     expect(finished(await workspace.advance()).data.status).toBe("succeeded");
     expect(await readFile(join(workspace.root, "target.txt"), "utf8")).toBe("after\n");
     expect((await workspace.store.read(workspace.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
 
-    const guardedShell = await fixture("shell", { command: "printf workspace" }, { approvalMode: "workspace_write" }, [], ToolService);
-    expect(await guardedShell.advance()).toMatchObject({ status: "waiting_for_approval" });
-    expect((await guardedShell.store.read(guardedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(1);
+    const sandboxedShell = await fixture("shell", { command: "printf workspace" }, { approvalMode: "workspace_write" }, [], ToolService);
+    expect(finished(await sandboxedShell.advance()).data).toMatchObject({ status: "succeeded", result: {
+      stdout: { text: "workspace" }, file_sandbox: { mode: "workspace_write", backend: "bubblewrap", enforcement: "partial" }
+    } });
+    expect((await sandboxedShell.store.read(sandboxedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
+
+    const fallbackShell = await fixture("shell", { command: "printf fallback" }, { approvalMode: "workspace_write", shellSandboxAvailable: false }, [], ToolService);
+    expect(await fallbackShell.advance()).toMatchObject({ status: "waiting_for_approval" });
+    expect((await fallbackShell.store.read(fallbackShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(1);
+
+    const readOnlyShell = await fixture("shell", { command: "printf guarded" }, { approvalMode: "manual" }, [], ToolService);
+    expect(await readOnlyShell.advance()).toMatchObject({ status: "waiting_for_approval" });
 
     const fullShell = await fixture("shell", { command: "printf full" }, { approvalMode: "full_access" }, [], ToolService);
-    expect(finished(await fullShell.advance()).data).toMatchObject({ status: "succeeded", result: { stdout: { text: "full" } } });
+    expect(finished(await fullShell.advance()).data).toMatchObject({ status: "succeeded", result: {
+      stdout: { text: "full" }, file_sandbox: { mode: "full_access", backend: "none", enforcement: "none" }
+    } });
     const fullEvents = await fullShell.store.read(fullShell.sessionId);
     expect(fullEvents.find((event) => event.type === "run.started")?.data).toMatchObject({ approval_mode: "full_access" });
     expect(fullEvents.filter((event) => event.type === "approval.requested")).toHaveLength(0);

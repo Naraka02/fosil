@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { parseShellToolInvocation, type EventReason, type Evidence, type ExecutionError, type JsonValue, type ShellToolInvocation } from "@fosil/contracts";
 import { ToolCancelled } from "./file-tools.js";
 
@@ -8,6 +9,7 @@ const OUTPUT_BYTES = 64 * 1024;
 const POLL_MS = 100;
 const TERM_GRACE_MS = 500;
 const KILL_GRACE_MS = 1000;
+const BWRAP = "/usr/bin/bwrap";
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 const elapsed = (since: number) => Math.max(0, Math.round(performance.now() - since));
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH";
@@ -20,6 +22,10 @@ export interface ShellToolExecution {
   exit_code: number | null;
   evidence: Evidence;
 }
+
+export type ShellFileMode = "full_access" | "workspace_write";
+export interface ShellToolOptions { fileMode?: ShellFileMode; protectedFiles?: readonly string[] }
+export const workspaceShellSandboxAvailable = () => process.platform === "linux" && existsSync(BWRAP);
 
 interface Identity { pid: number; group: number; session: number; started: string; state: string }
 
@@ -109,11 +115,44 @@ class Capture {
 
 function failure(code: string, message: string): ExecutionError { return { code, message, details: null }; }
 
-/** Server-internal executor; durable approval and dispatch are required before entry. */
-export async function executeShellTool(workspace: string, invocation: ShellToolInvocation, beforeEffect: () => Promise<void>): Promise<ShellToolExecution> {
+async function workspaceSandboxArgs(workspace: string, command: string, protectedFiles: readonly string[]): Promise<string[] | null> {
+  if (!workspaceShellSandboxAvailable()) return null;
+  const args = ["--die-with-parent", "--ro-bind", "/", "/", "--tmpfs", "/tmp"];
+  if (workspace === "/tmp" || workspace.startsWith("/tmp/")) args.push("--dir", workspace);
+  args.push("--bind", workspace, workspace);
+  const protectedDirectories = new Set<string>();
+  for (const candidate of protectedFiles) {
+    const lexical = resolve(candidate);
+    if (!lexical.startsWith(`${workspace}/`) || dirname(lexical) === workspace) continue;
+    try {
+      const parent = await realpath(dirname(lexical));
+      if (parent.startsWith(`${workspace}/`)) protectedDirectories.add(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  for (const directory of protectedDirectories) args.push("--ro-bind", directory, directory);
+  for (const candidate of protectedFiles) {
+    const lexical = resolve(candidate);
+    if (!lexical.startsWith(`${workspace}/`) || protectedDirectories.has(dirname(lexical))) continue;
+    try {
+      const path = await realpath(candidate);
+      if (path.startsWith(`${workspace}/`)) args.push("--ro-bind", path, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  args.push("--proc", "/proc", "--dev", "/dev", "--chdir", workspace, "/bin/sh", "-c", command);
+  return args;
+}
+
+/** Server-internal executor; durable policy and dispatch are required before entry. */
+export async function executeShellTool(workspace: string, invocation: ShellToolInvocation, beforeEffect: () => Promise<void>,
+  options: ShellToolOptions = {}): Promise<ShellToolExecution> {
   invocation = parseShellToolInvocation(invocation);
   const command = invocation.arguments.command;
   const timeout = invocation.arguments.timeout_ms ?? 120_000;
+  const fileMode = options.fileMode ?? "full_access";
   const startedAt = performance.now();
   const stdout = new Capture(), stderr = new Capture();
   let owner: Identity | undefined;
@@ -131,6 +170,10 @@ export async function executeShellTool(workspace: string, invocation: ShellToolI
   let guardFailure: { value: unknown } | undefined;
 
   const outcome = (): ShellToolExecution => {
+    const fileSandbox = {
+      mode: fileMode, backend: fileMode === "workspace_write" ? "bubblewrap" : "none",
+      enforcement: fileMode === "workspace_write" ? "partial" : "none"
+    };
     const processData = {
       pid, process_group: owner?.group ?? null, session: owner?.session ?? null,
       start_time_ticks: owner?.started ?? null, leader_exited: exited,
@@ -141,12 +184,12 @@ export async function executeShellTool(workspace: string, invocation: ShellToolI
     const value: ShellToolExecution = {
       status: reason === "completed" ? "succeeded" : reason === "cancel_requested" ? "cancelled" : "failed",
       reason, exit_code: code, error,
-      result: { command, cwd: workspace, stdout: stdout.result(), stderr: stderr.result(), process: processData },
-      evidence: { kind: cleanupFailed ? "unknown" : "command", data: { command, cwd: workspace, ...processData } }
+      result: { command, cwd: workspace, file_sandbox: fileSandbox, stdout: stdout.result(), stderr: stderr.result(), process: processData },
+      evidence: { kind: cleanupFailed ? "unknown" : "command", data: { command, cwd: workspace, file_sandbox: fileSandbox, ...processData } }
     };
     // The raw capture cap also bounds worst-case JSON escaping. Check the final envelope too.
     if (Buffer.byteLength(JSON.stringify(value)) > 1024 * 1024) {
-      value.result = { command, cwd: workspace, stdout_omitted: true, stderr_omitted: true, reason: "result_too_large", process: processData };
+      value.result = { command, cwd: workspace, file_sandbox: fileSandbox, stdout_omitted: true, stderr_omitted: true, reason: "result_too_large", process: processData };
     }
     return value;
   };
@@ -159,10 +202,16 @@ export async function executeShellTool(workspace: string, invocation: ShellToolI
   } catch {
     reason = "tool_failed"; error = failure("workspace_changed", "Workspace must be its pinned canonical directory"); return outcome();
   }
+  const sandboxArgs = fileMode === "workspace_write"
+    ? await workspaceSandboxArgs(workspace, command, options.protectedFiles ?? []) : undefined;
+  if (fileMode === "workspace_write" && !sandboxArgs) {
+    reason = "tool_failed"; error = failure("sandbox_unavailable", "Workspace Write shell sandbox is unavailable"); return outcome();
+  }
   await beforeEffect();
 
   // The bootstrap cannot run user code until its stopped identity is recorded and rechecked.
-  const child = spawn("/bin/sh", ["-c", 'kill -STOP "$$"; exec /bin/sh -c "$1"', "fosil-shell", command], {
+  const executable = sandboxArgs ? [BWRAP, ...sandboxArgs] : ["/bin/sh", "-c", command];
+  const child = spawn("/bin/sh", ["-c", 'kill -STOP "$$"; exec "$@"', "fosil-shell", ...executable], {
     cwd: workspace, detached: true, stdio: ["ignore", "pipe", "pipe"],
     env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", LANG: "C.UTF-8", LC_ALL: "C.UTF-8" }
   });
