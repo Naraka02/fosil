@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Event, EventInput, ModelOutput, ModelRequestContext } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { AgentLoopService } from "./agent-loop.js";
+import { ToolRegistry } from "./tool-registry.js";
 import { ModelProviderRequestError, type ModelProvider } from "../providers/model-provider.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
@@ -226,6 +227,84 @@ async function expectStopped(pids: readonly number[]) {
 }
 
 describe("agent loop execution", () => {
+  it("overlaps explicitly safe sibling tools and commits their results in model order", async () => {
+    const f = await fixture();
+    const gates = { a: barrier(), b: barrier() };
+    const entered = new Set<string>();
+    const allEntered = barrier();
+    const registry = new ToolRegistry([{
+      schema: { name: "parallel_probe", description: "Controlled parallel probe", parameters: { type: "object" } },
+      parse: (value) => {
+        if (typeof value !== "object" || value === null || !("id" in value) || !["a", "b"].includes(String(value.id))) throw new TypeError("invalid probe");
+        return { id: String(value.id) as "a" | "b" };
+      },
+      requiresApproval: () => false,
+      executionMode: () => "parallel" as const,
+      execute: async ({ id }: { id: "a" | "b" }) => {
+        entered.add(id); if (entered.size === 2) allEntered.release();
+        await gates[id].promise;
+        return { status: "succeeded" as const, reason: "completed" as const, result: { id }, error: null,
+          exit_code: null, evidence: { kind: "none" as const, data: null } };
+      }
+    }]);
+    const p = provider(async function* (request) {
+      const results = request.messages.filter((message) => message.role === "tool");
+      if (!results.length) yield finish("probe", [call("parallel_probe", { id: "a" }, "a"), call("parallel_probe", { id: "b" }, "b")]);
+      else {
+        expect(results.map((message) => message.tool_call_id)).toEqual(["a", "b"]);
+        yield finish("parallel complete");
+      }
+    });
+    const running = loop(f, p.adapter, { toolRegistry: registry, maxParallelToolCalls: 2 }).run(f.sessionId, f.runId);
+    await allEntered.promise;
+    expect(await records(f, "tool.started")).toHaveLength(2);
+    expect(await records(f, "tool.finished")).toHaveLength(0);
+    gates.b.release();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(await records(f, "tool.finished")).toHaveLength(0);
+    gates.a.release();
+    expect(await running).toMatchObject({ status: "completed", output: { text: "parallel complete" } });
+    const createdIds = (await records(f, "tool.call.created")).map((event) => event.data.call_id);
+    expect((await records(f, "tool.finished")).map((event) => event.data.call_id)).toEqual(createdIds);
+    expect((await records(f, "tool.finished")).map((event) => event.data.result)).toEqual([{ id: "a" }, { id: "b" }]);
+  });
+
+  it("drains already-started parallel tools in declaration order after cancellation", async () => {
+    const f = await fixture();
+    const gates = { a: barrier(), b: barrier() };
+    const entered = new Set<string>();
+    const allEntered = barrier();
+    const registry = new ToolRegistry([{
+      schema: { name: "parallel_cancel_probe", description: "Controlled cancellation probe", parameters: { type: "object" } },
+      parse: (value) => {
+        if (typeof value !== "object" || value === null || !("id" in value) || !["a", "b"].includes(String(value.id))) throw new TypeError("invalid probe");
+        return { id: String(value.id) as "a" | "b" };
+      },
+      requiresApproval: () => false,
+      executionMode: () => "parallel" as const,
+      execute: async ({ id }: { id: "a" | "b" }, context) => {
+        entered.add(id); if (entered.size === 2) allEntered.release();
+        await gates[id].promise;
+        await context.beforeEffect();
+        return { status: "succeeded" as const, reason: "completed" as const, result: { id }, error: null,
+          exit_code: null, evidence: { kind: "none" as const, data: null } };
+      }
+    }]);
+    const p = provider(async function* () {
+      yield finish("probe", [call("parallel_cancel_probe", { id: "a" }, "a"), call("parallel_cancel_probe", { id: "b" }, "b")]);
+    });
+    const running = loop(f, p.adapter, { toolRegistry: registry, maxParallelToolCalls: 2 }).run(f.sessionId, f.runId);
+    await allEntered.promise;
+    expect(await records(f, "tool.started")).toHaveLength(2);
+    await f.cancel();
+    gates.b.release(); gates.a.release();
+    expect(await running).toMatchObject({ status: "cancelled", reason: "cancel_requested" });
+    const createdIds = (await records(f, "tool.call.created")).map((event) => event.data.call_id);
+    const finished = await records(f, "tool.finished");
+    expect(finished.map((event) => event.data.call_id)).toEqual(createdIds);
+    expect(finished.map((event) => event.data.status)).toEqual(["cancelled", "cancelled"]);
+  });
+
   it("computes provider metadata from the same masked request that is persisted and dispatched", async () => {
     const secret = "fixture-secret-value";
     const f = await fixture("Inspect the request boundary", undefined, { maskSecrets: [secret] });

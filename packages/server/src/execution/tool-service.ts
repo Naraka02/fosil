@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { toolRequiresApproval, parseEventInput, parseToolInvocation, type ApprovalMode, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
+import { parseEventInput, type ApprovalMode, type Event, type EventInput } from "@fosil/contracts";
 import { replay, type RunState, type ToolState } from "@fosil/core";
-import { executeFileTool, FileToolError, ToolCancelled } from "../tools/file-tools.js";
-import { executeShellTool, workspaceShellSandboxAvailable } from "../tools/shell-tools.js";
+import { FileToolError, ToolCancelled } from "../tools/file-tools.js";
+import { workspaceShellSandboxAvailable } from "../tools/shell-tools.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
+import { createBuiltinToolRegistry, type ToolRegistry } from "./tool-registry.js";
 
 type Finished = Extract<Event, { type: "tool.finished" }>;
 type FinishedData = Finished["data"];
 export type ToolAdvance = { status: "finished"; event: Finished }
   | { status: "waiting_for_approval"; approvalId: string; expiresAt: string }
   | { status: "in_progress"; callId: string };
-export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number; signal?: AbortSignal; shellSandboxAvailable?: boolean }
+export interface ToolServiceOptions { now?: () => Date; approvalTtlMs?: number; signal?: AbortSignal; shellSandboxAvailable?: boolean; registry?: ToolRegistry }
 const unsettled = (tool: ToolState) => ["created", "waiting_for_approval", "running"].includes(tool.status);
 
 /** Trusted local service; callers cannot supply operation arguments, policy, or cwd. */
@@ -19,6 +20,7 @@ export class ToolService {
   private readonly ttl: number;
   private readonly signal: AbortSignal | undefined;
   private readonly shellSandboxAvailable: boolean;
+  private readonly registry: ToolRegistry;
   private readonly operations = new Map<string, Promise<unknown>>();
 
   constructor(private readonly store: SqliteWorkerStore, options: ToolServiceOptions = {}) {
@@ -26,6 +28,7 @@ export class ToolService {
     this.ttl = options.approvalTtlMs ?? 300_000;
     this.signal = options.signal;
     this.shellSandboxAvailable = options.shellSandboxAvailable ?? workspaceShellSandboxAvailable();
+    this.registry = options.registry ?? createBuiltinToolRegistry();
     if (!Number.isSafeInteger(this.ttl) || this.ttl < 1 || this.ttl > 86_400_000) throw new Error("Approval lifetime must be between 1 ms and 24 hours");
   }
 
@@ -47,7 +50,8 @@ export class ToolService {
       await this.store.append(this.input(sessionId, "tool.call.created", {
         run_id: runId, step: step.step, request_id: request.requestId, attempt: request.attempt,
         call_id: callId, provider_call_id: providerCallId, tool_name: declared.name, arguments: declared.arguments,
-        cwd: state.workspaceRoot, requires_approval: gated, approval_id: gated ? randomUUID() : null, origin: "runner"
+        cwd: state.workspaceRoot, requires_approval: gated, approval_id: gated ? randomUUID() : null,
+        execution_mode: this.registry.executionMode(declared.name, declared.arguments), origin: "runner"
       }));
       return callId;
     });
@@ -71,8 +75,9 @@ export class ToolService {
     // A recorded start is never treated as permission to resume or repeat an effect.
     if (call.started) return { status: "in_progress", callId };
     if (state.activeRunId !== runId) throw new StoreError("inactive_run", "Run is no longer active");
-    if ([...run.tools.values()].find(unsettled)?.callId !== callId) throw new StoreError("tool_order", "An earlier tool call must settle first");
-    if (call.cwd !== state.workspaceRoot || call.requiresApproval !== this.requiresApproval(call.toolName, run.approvalMode)) {
+    if (!this.mayAdvance(run, call)) throw new StoreError("tool_order", "An earlier tool call or exclusive barrier must settle first");
+    if (call.cwd !== state.workspaceRoot || call.requiresApproval !== this.requiresApproval(call.toolName, run.approvalMode)
+      || call.executionMode !== this.registry.executionMode(call.toolName, call.arguments)) {
       throw new StoreError("policy_mismatch", "Recorded call does not match the tool policy or workspace");
     }
     const common = { run_id: runId, step: call.step, request_id: call.requestId, attempt: call.attempt, call_id: callId, approval_id: call.approvalId };
@@ -90,7 +95,7 @@ export class ToolService {
     }
     if (approval?.status === "denied" || approval?.status === "expired") return finish({ status: "denied", reason: approval.status });
     let invocation;
-    try { invocation = this.parseInvocation({ name: call.toolName, arguments: call.arguments }); }
+    try { invocation = this.registry.resolve(call.toolName, call.arguments); }
     catch {
       return finish({ status: "failed", reason: "validation_failed", error: { code: "invalid_arguments", message: "Unknown tool or invalid arguments", details: null } });
     }
@@ -140,36 +145,58 @@ export class ToolService {
           throw new StoreError("inactive_dispatch", "Dispatch is no longer active");
         }
       };
-      if (invocation.name === "shell") outcome = await executeShellTool(call.cwd, invocation, beforeEffect, {
-        fileMode: run.approvalMode === "workspace_write" && !call.requiresApproval ? "workspace_write" : "full_access",
-        protectedFiles
+      outcome = await this.registry.execute(invocation, {
+        workspace: call.cwd, protectedFiles, approvalMode: run.approvalMode,
+        workspaceShellSandboxed: call.toolName === "shell" && run.approvalMode === "workspace_write" && !call.requiresApproval,
+        beforeEffect
       });
-      else {
-        const executed = await executeFileTool(call.cwd, invocation, protectedFiles, beforeEffect);
-        outcome = { status: "succeeded", reason: "completed", ...executed };
-      }
     } catch (error) {
       // Persistence failures are not tool outcomes. Leave the dispatched call unresolved.
       if (error instanceof StoreError) throw error;
       if (error instanceof ToolCancelled) outcome = { status: "cancelled", reason: "cancel_requested" };
       else {
-        const uncertain = invocation.name === "shell" || (error instanceof FileToolError && error.uncertain);
+        const uncertain = error instanceof FileToolError ? error.uncertain
+          : invocation.definition.unexpectedFailure !== "known";
         outcome = {
           status: "failed", reason: uncertain ? "cleanup_failed" : "tool_failed",
-          error: { code: error instanceof FileToolError ? error.code : invocation.name === "shell" ? "shell_runner" : "file_io", message: error instanceof FileToolError ? error.message : "Tool operation failed", details: null },
+          error: { code: error instanceof FileToolError ? error.code : call.toolName === "shell" ? "shell_runner" : "tool_execution",
+            message: error instanceof FileToolError ? error.message : "Tool operation failed", details: null },
           evidence: uncertain ? { kind: "unknown", data: { outcome: "unknown", inspection_required: true } } : { kind: "none", data: null }
         };
       }
     }
     // A cancellation after replacement does not erase the observed successful effect.
+    await this.waitForCommitTurn(sessionId, runId, callId, signal);
     return finish({ ...outcome, timings: { first_content_ms: null, duration_ms: performance.now() - startedAt } });
   }
 
-  protected parseInvocation(value: unknown): ToolInvocation { return parseToolInvocation(value); }
   protected requiresApproval(name: string, mode: ApprovalMode): boolean {
-    if (mode === "full_access") return false;
-    if (mode === "workspace_write") return name === "shell" && !this.shellSandboxAvailable;
-    return toolRequiresApproval(name);
+    return this.registry.requiresApproval(name, mode, this.shellSandboxAvailable);
+  }
+
+  private mayAdvance(run: RunState, call: ToolState): boolean {
+    const step = run.steps.get(call.step);
+    if (!step) return false;
+    const index = step.callIds.indexOf(call.callId);
+    const earlier = step.callIds.slice(0, index).map((id) => run.tools.get(id)!)
+      .filter((candidate) => unsettled(candidate));
+    if (call.executionMode === "exclusive") return earlier.length === 0 && run.activeToolIds.size === 0;
+    return [...run.activeToolIds].every((id) => run.tools.get(id)?.executionMode === "parallel")
+      && earlier.every((candidate) => candidate.executionMode === "parallel" && candidate.status === "running");
+  }
+
+  private async waitForCommitTurn(sessionId: string, runId: string, callId: string, signal?: AbortSignal): Promise<void> {
+    for (;;) {
+      this.checkService(signal);
+      const { run } = await this.load(sessionId, runId);
+      const call = run.tools.get(callId);
+      const step = call && run.steps.get(call.step);
+      if (!call || !step) throw new StoreError("missing_call", "Tool call disappeared before result persistence");
+      const index = step.callIds.indexOf(callId);
+      const earlierSettled = step.callIds.slice(0, index).every((id) => !unsettled(run.tools.get(id)!));
+      if (earlierSettled) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
   }
 
   private checkService(signal?: AbortSignal): void {

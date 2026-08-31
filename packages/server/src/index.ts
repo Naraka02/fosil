@@ -4,6 +4,8 @@ export { FileToolService } from "./execution/file-tool-service.js";
 export type { FileToolServiceOptions, ToolAdvance } from "./execution/file-tool-service.js";
 export { ToolService } from "./execution/tool-service.js";
 export type { ToolServiceOptions } from "./execution/tool-service.js";
+export { ToolRegistry, createBuiltinToolRegistry, createFileToolRegistry } from "./execution/tool-registry.js";
+export type { ToolDefinition, ToolExecutionContext, ToolExecutionMode, RegisteredToolOutcome } from "./execution/tool-registry.js";
 export { AgentLoopService } from "./execution/agent-loop.js";
 export type { AgentLoopOptions, LoopOutcome } from "./execution/agent-loop.js";
 export { executeModelRequest, ModelProviderCleanupError, ModelProviderRequestError } from "./providers/model-provider.js";

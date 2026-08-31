@@ -1,12 +1,13 @@
 import { constants, type BigIntStats } from "node:fs";
-import { lstat, open, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, open, readdir, realpath, rename, stat, unlink, type FileHandle } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, matchesGlob } from "node:path";
 import { parseFileToolInvocation, type Evidence, type FileToolInvocation, type JsonValue } from "@fosil/contracts";
 
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_RESULT_BYTES = 1024 * 1024;
 const protectedSegments = new Set([".git", ".agents", ".codex"]);
+const MAX_DISCOVERED_FILES = 20_000;
 export interface FileToolResult { result: JsonValue; evidence: Evidence }
 export class FileToolError extends Error {
   constructor(readonly code: string, message: string, readonly uncertain = false) { super(message); }
@@ -51,10 +52,15 @@ interface Target {
   verify: () => Promise<void>;
 }
 
-async function withTarget<T>(workspace: string, relative: string, protectedFiles: readonly string[], use: (target: Target) => Promise<T>): Promise<T> {
-  if (process.platform !== "linux") throw new FileToolError("unsupported_platform", "File tools require Linux and procfs");
+function checkRelativePath(relative: string): string[] {
   const parts = relative.split("/");
   if (parts.some((part) => protectedSegments.has(part))) throw new FileToolError("protected_path", "Repository control directories are not accessible to file tools");
+  return parts;
+}
+
+async function withTarget<T>(workspace: string, relative: string, protectedFiles: readonly string[], use: (target: Target) => Promise<T>): Promise<T> {
+  if (process.platform !== "linux") throw new FileToolError("unsupported_platform", "File tools require Linux and procfs");
+  const parts = checkRelativePath(relative);
   const targetPath = join(workspace, relative);
   if (protectedFiles.includes(targetPath)) throw new FileToolError("protected_path", "Active database files cannot be accessed by file tools");
   if (await realpath(workspace) !== workspace) throw new FileToolError("workspace_changed", "Workspace no longer resolves to its pinned path");
@@ -93,6 +99,105 @@ async function withTarget<T>(workspace: string, relative: string, protectedFiles
   }
 }
 
+interface ParentTarget { parent: FileHandle; path: string; verify: () => Promise<void> }
+
+async function withParent<T>(workspace: string, relative: string, protectedFiles: readonly string[], use: (target: ParentTarget) => Promise<T>): Promise<T> {
+  if (process.platform !== "linux") throw new FileToolError("unsupported_platform", "File tools require Linux and procfs");
+  const parts = checkRelativePath(relative);
+  const targetPath = join(workspace, relative);
+  if (protectedFiles.includes(targetPath)) throw new FileToolError("protected_path", "Active database files cannot be accessed by file tools");
+  if (await realpath(workspace) !== workspace) throw new FileToolError("workspace_changed", "Workspace no longer resolves to its pinned path");
+  const handles: FileHandle[] = [];
+  const expected: string[] = [];
+  try {
+    const root = await open(workspace, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    handles.push(root); expected.push(workspace);
+    let parent = root;
+    let current = workspace;
+    for (const part of parts.slice(0, -1)) {
+      parent = await open(`${fdPath(parent)}/${part}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      current = join(current, part); handles.push(parent); expected.push(current);
+    }
+    const verify = async () => {
+      if (await realpath(workspace) !== workspace) throw new FileToolError("workspace_changed", "Workspace path changed");
+      for (let i = 0; i < handles.length; i++) if (await realpath(fdPath(handles[i]!)) !== expected[i]) throw new FileToolError("path_changed", "An opened path moved or changed");
+    };
+    await verify();
+    return await use({ parent, path: `${fdPath(parent)}/${parts.at(-1)!}`, verify });
+  } finally {
+    const closed = await Promise.allSettled(handles.reverse().map((handle) => handle.close()));
+    if (closed.some((result) => result.status === "rejected")) throw new FileToolError("cleanup_failed", "Could not close owned directory handles", true);
+  }
+}
+
+async function discoverFiles(workspace: string, rootRelative: string | undefined, protectedFiles: readonly string[]): Promise<string[]> {
+  if (process.platform !== "linux") throw new FileToolError("unsupported_platform", "File tools require Linux and procfs");
+  if (await realpath(workspace) !== workspace) throw new FileToolError("workspace_changed", "Workspace no longer resolves to its pinned path");
+  if (rootRelative) checkRelativePath(rootRelative);
+  const root = rootRelative ? join(workspace, rootRelative) : workspace;
+  let rootStat;
+  try { rootStat = await stat(root); } catch { throw new FileToolError("path_not_found", "Search root does not exist"); }
+  if (!rootStat.isDirectory() || await realpath(root) !== root) throw new FileToolError("unsupported_file", "Search root must be a real directory");
+  const files: string[] = [];
+  const pending = [rootRelative ?? ""];
+  while (pending.length) {
+    const directory = pending.pop()!;
+    const absolute = directory ? join(workspace, directory) : workspace;
+    const entries = (await readdir(absolute, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (protectedSegments.has(entry.name) || entry.isSymbolicLink()) continue;
+      const relative = directory ? `${directory}/${entry.name}` : entry.name;
+      const absoluteEntry = join(workspace, relative);
+      if (protectedFiles.includes(absoluteEntry)) continue;
+      if (entry.isDirectory()) pending.push(relative);
+      else if (entry.isFile()) {
+        const metadata = await lstat(absoluteEntry, { bigint: true });
+        if (metadata.nlink !== 1n) continue;
+        files.push(relative);
+        if (files.length > MAX_DISCOVERED_FILES) throw new FileToolError("result_too_large", "Workspace discovery exceeded its file scan limit");
+      }
+    }
+  }
+  return files.sort();
+}
+
+async function createFile(workspace: string, path: string, content: string, protectedFiles: readonly string[], beforeEffect: () => Promise<void>): Promise<FileToolResult> {
+  const bytes = Buffer.from(content, "utf8");
+  if (content.includes("\0") || bytes.toString("utf8") !== content) throw new FileToolError("unsupported_text", "Content must be valid UTF-8 text");
+  if (bytes.length > MAX_FILE_BYTES) throw new FileToolError("file_too_large", "Content exceeds 1 MiB");
+  const after = { content, sha256: digest(bytes), bytes: bytes.length };
+  const result = boundedResult({ result: { path, changed: true, created: true, sha256: after.sha256, bytes: after.bytes, truncated: false },
+    evidence: { kind: "file_change", data: { path, before: { exists: false }, after, diff: unifiedDiff(path, "", content), truncated: false } } });
+  return withParent(workspace, path, protectedFiles, async (target) => {
+    try { await lstat(target.path); throw new FileToolError("stale_preimage", "File already exists"); }
+    catch (error) { if (error instanceof FileToolError) throw error; if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const temporary = `${fdPath(target.parent)}/.fosil-edit-${randomUUID()}.tmp`;
+    let owned = false;
+    let linked = false;
+    try {
+      const temp = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o644);
+      owned = true;
+      try { await temp.writeFile(bytes); await temp.sync(); }
+      finally { await temp.close(); }
+      await beforeEffect(); await target.verify();
+      try { await lstat(target.path); throw new FileToolError("stale_preimage", "File appeared before creation"); }
+      catch (error) { if (error instanceof FileToolError) throw error; if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      await link(temporary, target.path); linked = true;
+      await unlink(temporary); owned = false;
+      await target.parent.sync();
+      return result;
+    } catch (error) {
+      if (linked) throw new FileToolError("cleanup_failed", "Creation outcome or durability could not be confirmed", true);
+      throw error;
+    } finally {
+      if (owned) {
+        try { await unlink(temporary); }
+        catch { throw new FileToolError("cleanup_failed", "Could not remove the owned create temporary file", true); }
+      }
+    }
+  });
+}
+
 function unifiedDiff(path: string, before: string, after: string): string {
   const lines = (value: string) => value === "" ? [] : value.endsWith("\n") ? value.slice(0, -1).split("\n") : value.split("\n");
   const oldLines = lines(before), newLines = lines(after);
@@ -108,11 +213,48 @@ function unifiedDiff(path: string, before: string, after: string): string {
 export async function executeFileTool(workspace: string, invocation: FileToolInvocation, protectedFiles: readonly string[], beforeEffect: () => Promise<void>): Promise<FileToolResult> {
   invocation = parseFileToolInvocation(invocation);
   await beforeEffect();
+  if (invocation.name === "glob") {
+    const files = await discoverFiles(workspace, invocation.arguments.path, protectedFiles);
+    const matches = files.filter((path) => matchesGlob(path, invocation.arguments.pattern));
+    const limit = invocation.arguments.max_results ?? 100;
+    return boundedResult({ result: { pattern: invocation.arguments.pattern, path: invocation.arguments.path ?? null,
+      matches: matches.slice(0, limit), truncated: matches.length > limit }, evidence: { kind: "none", data: null } });
+  }
+  if (invocation.name === "grep") {
+    const files = await discoverFiles(workspace, invocation.arguments.path, protectedFiles);
+    const selected = invocation.arguments.include ? files.filter((path) => matchesGlob(path, invocation.arguments.include!)) : files;
+    const matches: JsonValue[] = [];
+    let truncated = false;
+    const limit = invocation.arguments.max_matches ?? 50;
+    for (const path of selected) {
+      try {
+        const read = await executeFileTool(workspace, { name: "search_text", arguments: { path, query: invocation.arguments.query,
+          max_matches: Math.min(100, limit - matches.length) } }, protectedFiles, beforeEffect);
+        const found = (read.result as { matches: JsonValue[] }).matches;
+        for (const match of found) matches.push({ path, ...(match as Record<string, JsonValue>) });
+        if (matches.length >= limit) { truncated = true; break; }
+      } catch (candidate) {
+        if (!(candidate instanceof FileToolError) || !["unsupported_text", "file_too_large", "file_changed"].includes(candidate.code)) throw candidate;
+      }
+    }
+    return boundedResult({ result: { query: invocation.arguments.query, path: invocation.arguments.path ?? null,
+      include: invocation.arguments.include ?? null, matches: matches.slice(0, limit), truncated }, evidence: { kind: "none", data: null } });
+  }
+  if (invocation.name === "write_file" && invocation.arguments.expected_sha256 === null) {
+    return createFile(workspace, invocation.arguments.path, invocation.arguments.content, protectedFiles, beforeEffect);
+  }
   return withTarget(workspace, invocation.arguments.path, protectedFiles, async (target) => {
     const before = await snapshot(target.handle);
     await target.verify();
     if (invocation.name === "read_file") {
-      return boundedResult({ result: { path: invocation.arguments.path, content: before.content, sha256: before.sha256, bytes: before.bytes, truncated: false }, evidence: { kind: "none", data: null } });
+      const { offset, limit } = invocation.arguments;
+      if (offset === undefined && limit === undefined) return boundedResult({ result: { path: invocation.arguments.path, content: before.content, sha256: before.sha256, bytes: before.bytes, truncated: false }, evidence: { kind: "none", data: null } });
+      const lines = before.content.split("\n");
+      const start = (offset ?? 1) - 1;
+      const selected = lines.slice(start, start + (limit ?? 400));
+      return boundedResult({ result: { path: invocation.arguments.path, content: selected.join("\n"), offset: start + 1,
+        returned_lines: selected.length, total_lines: lines.length, sha256: before.sha256, bytes: before.bytes,
+        truncated: start > 0 || start + selected.length < lines.length }, evidence: { kind: "none", data: null } });
     }
     if (invocation.name === "search_text") {
       const { query, path, max_matches = 50 } = invocation.arguments;
@@ -128,7 +270,18 @@ export async function executeFileTool(workspace: string, invocation: FileToolInv
       }
       return boundedResult({ result: { path, query, sha256: before.sha256, matches, truncated }, evidence: { kind: "none", data: null } });
     }
-    const { path, expected_sha256, replacement } = invocation.arguments;
+    const path = invocation.arguments.path;
+    const expected_sha256 = invocation.arguments.expected_sha256;
+    let replacement: string;
+    if (invocation.name === "write_file") replacement = invocation.arguments.content;
+    else if ("replacement" in invocation.arguments) replacement = invocation.arguments.replacement;
+    else {
+      const count = before.content.split(invocation.arguments.old_text).length - 1;
+      if (count === 0 || (count > 1 && !invocation.arguments.replace_all)) throw new FileToolError("ambiguous_edit", count === 0 ? "Literal edit text was not found" : "Literal edit text is not unique");
+      replacement = invocation.arguments.replace_all
+        ? before.content.split(invocation.arguments.old_text).join(invocation.arguments.new_text)
+        : before.content.replace(invocation.arguments.old_text, invocation.arguments.new_text);
+    }
     if (before.sha256 !== expected_sha256) throw new FileToolError("stale_preimage", "File digest no longer matches the approved preimage");
     const bytes = Buffer.from(replacement, "utf8");
     if (replacement.includes("\0") || bytes.toString("utf8") !== replacement) throw new FileToolError("unsupported_text", "Replacement must be valid UTF-8 text");

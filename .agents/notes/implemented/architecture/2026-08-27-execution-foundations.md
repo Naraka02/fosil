@@ -20,7 +20,7 @@ Linux, including WSL2, is the verified execution environment. No core Python env
 
 ### Execution identities and state
 
-The [execution-event contract](../../../../docs/execution-events.md) separates sessions, runs, steps, request attempts, tool calls, approvals, and command identities. A per-session sequence identifies a fact without another event UUID. The pure reducer enforces correlated parent/child lifecycles, one active run per session, sequential dispatch within each run, frozen approvals, and cancellation barriers. Explicit terminal facts settle children and runs, so cleanup remains attributable after failure or cancellation.
+The [execution-event contract](../../../../docs/execution-events.md) separates sessions, runs, steps, request attempts, tool calls, approvals, and command identities. A per-session sequence identifies a fact without another event UUID. The pure reducer enforces correlated parent/child lifecycles, one active run per session, frozen approvals, cancellation barriers, and declaration-ordered terminal facts. The [Tool Runtime v2 decision](2026-08-31-tool-runtime-v2.md) supersedes the initial fully sequential dispatch rule only for explicitly safe sibling calls. Explicit terminal facts settle children and runs, so cleanup remains attributable after failure or cancellation.
 
 Reduction and history projection are deterministic and perform no effects. Final model output is retained separately from streamed prefixes to avoid double counting; immutable state updates and per-run maps preserve replay integrity. Shared schema parsing establishes valid records, not proof that a real provider produced them or that a reported process was cleaned up.
 

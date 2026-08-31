@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { toolDefinitions, type ModelRequestContext } from "@fosil/contracts";
+import { modelRequestContextSchema, toolDefinitions, type ModelRequestContext } from "@fosil/contracts";
 import { applyEvent, planRecovery, replay } from "./index.js";
 import { buildModelRequest } from "./model-context.js";
 
 const timestamp = "2026-08-28T00:00:00.000Z";
 const settings = { temperature: null, top_p: null, max_output_tokens: null };
-const options = { provider: "controlled", model: "fixture", system_instructions: ["Inspect and repair the fixture."], settings };
-const request: ModelRequestContext = { ...options, messages: [], tools: [] };
+const tools = modelRequestContextSchema.parse({ provider: "controlled", model: "fixture", system_instructions: [], settings,
+  messages: [], tools: toolDefinitions() }).tools;
+const options = { provider: "controlled", model: "fixture", system_instructions: ["Inspect and repair the fixture."], settings, tools };
+const request: ModelRequestContext = { ...options, messages: [] };
 const usage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
 const correlation = { run_id: "run", step: 1, request_id: "request", attempt: 1 };
 

@@ -85,6 +85,16 @@ function nextTool(run: RunState, call: ToolState): void {
   requireFact(first?.callId === call.callId, "tool-order", "tools must settle in model response order");
 }
 
+function mayStartTool(run: RunState, call: ToolState): boolean {
+  const step = run.steps.get(call.step);
+  if (!step) return false;
+  const index = step.callIds.indexOf(call.callId);
+  const earlierOpen = step.callIds.slice(0, index).map((id) => run.tools.get(id)!).filter((candidate) => !terminalTool(candidate));
+  if (call.executionMode === "exclusive") return earlierOpen.length === 0 && run.activeToolIds.size === 0;
+  return [...run.activeToolIds].every((id) => run.tools.get(id)?.executionMode === "parallel")
+    && earlierOpen.every((candidate) => candidate.executionMode === "parallel" && candidate.status === "running");
+}
+
 function terminalSemantics(run: RunState, data: { status: string; reason: EventReason; origin?: string | undefined }): void {
   if (data.status === "completed" || data.status === "succeeded") {
     requireFact(data.reason === "completed", "invalid-outcome", "successful completion requires a completion reason");
@@ -127,7 +137,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     return replaceRun(previous, {
       runId: event.data.run_id, commandId: event.data.command_id, approvalMode: event.data.approval_mode ?? "manual", status: "running", reason: null,
       blockedReason: null, cancelRequested: false, userMessage: null, activeStep: null,
-      activeRequestId: null, activeToolId: null, activeCompactionId: null, compactionIds: [],
+      activeRequestId: null, activeToolId: null, activeToolIds: new Set(), activeCompactionId: null, compactionIds: [],
       steps: new Map(), requests: new Map(), tools: new Map(), approvals: new Map()
     });
   }
@@ -165,7 +175,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       dispatchable(run);
       const step = run.steps.get(event.data.step);
       requireFact(step?.status === "running" && run.activeStep === event.data.step && step.requestIds.length <= 1
-        && run.activeRequestId === null && run.activeToolId === null && run.activeCompactionId === null && !pendingApproval(run),
+        && run.activeRequestId === null && run.activeToolIds.size === 0 && run.activeCompactionId === null && !pendingApproval(run),
       "busy-request", "a step supports one request plus one recorded context recovery attempt");
       const priorRequest = step.requestIds.length === 0 ? undefined : run.requests.get(step.requestIds[0]!);
       const recoveryCompaction = run.compactionIds.length === 0 ? undefined : previous.compactions.get(run.compactionIds.at(-1)!);
@@ -222,7 +232,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       const step = run.activeStep === null ? undefined : run.steps.get(run.activeStep);
       const priorRequest = step?.requestIds.length ? run.requests.get(step.requestIds.at(-1)!) : undefined;
       requireFact(run.activeCompactionId === null && !previous.compactions.has(event.data.compaction_id)
-        && run.activeRequestId === null && run.activeToolId === null && !pendingApproval(run),
+        && run.activeRequestId === null && run.activeToolIds.size === 0 && !pendingApproval(run),
       "busy-compaction", "compaction requires no other open provider, tool, or approval operation");
       requireFact(event.data.source.through_seq < event.seq && event.data.source.event_count <= event.data.source.through_seq,
         "invalid-compaction", "compaction source must identify an earlier durable prefix");
@@ -284,6 +294,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         callId: event.data.call_id, requestId: request.requestId, step: step.step, attempt: request.attempt,
         toolName: event.data.tool_name, arguments: event.data.arguments, cwd: event.data.cwd,
         providerCallId: expected.provider_call_id, requiresApproval: event.data.requires_approval,
+        executionMode: event.data.execution_mode ?? "exclusive",
         approvalId: event.data.approval_id, status: "created", started: false, reason: null,
         result: null, error: null, timings: null, exitCode: null, evidence: null
       };
@@ -298,7 +309,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       frozenCall(call, event.data);
       nextTool(run, call);
       requireFact(call.requiresApproval && call.status === "created" && !run.approvals.has(event.data.approval_id)
-        && !pendingApproval(run) && run.activeToolId === null,
+        && !pendingApproval(run) && run.activeToolIds.size === 0,
       "approval-required", "only the next gated call may request a new approval");
       const approval: ApprovalState = {
         approvalId: event.data.approval_id, callId: call.callId, status: "pending", reason: null,
@@ -338,23 +349,25 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       dispatchable(run);
       const call = callFor(run, event.data);
       frozenCall(call, event.data);
-      nextTool(run, call);
-      requireFact(call.status === "created" && run.activeToolId === null && run.activeRequestId === null && !pendingApproval(run),
-        "busy-tool", "tools execute once and sequentially");
+      requireFact(call.status === "created" && mayStartTool(run, call) && run.activeRequestId === null && !pendingApproval(run),
+        "busy-tool", "tool scheduling mode does not permit this dispatch");
       requireFact(!call.requiresApproval || (call.approvalId !== null && run.approvals.get(call.approvalId)?.status === "allowed"),
         "approval-required", "tool requires its own allow-once decision");
-      return replaceRun(previous, { ...run, activeToolId: call.callId, tools: put(run.tools, call.callId, { ...call, status: "running", started: true }) });
+      const activeToolIds = new Set(run.activeToolIds); activeToolIds.add(call.callId);
+      return replaceRun(previous, { ...run, activeToolId: run.activeToolId ?? call.callId, activeToolIds,
+        tools: put(run.tools, call.callId, { ...call, status: "running", started: true }) });
     }
     case "tool.finished": {
       const call = callFor(run, event.data);
       frozenCall(call, event.data);
       requireFact(!terminalTool(call), "duplicate-terminal", "tool already settled");
+      nextTool(run, call);
       const approval = call.approvalId === null ? undefined : run.approvals.get(call.approvalId);
       requireFact(approval?.status !== "pending", "pending-approval", "settle the pending approval before the tool");
       terminalSemantics(run, event.data);
       validateResult(event.data);
       if (call.status === "running") {
-        requireFact(run.activeToolId === call.callId && event.data.status !== "denied" && event.data.reason !== "validation_failed",
+        requireFact(run.activeToolIds.has(call.callId) && event.data.status !== "denied" && event.data.reason !== "validation_failed",
           "invalid-outcome", "a dispatched tool cannot become a pre-dispatch denial or validation failure");
       } else {
         const denied = event.data.status === "denied" && (approval?.status === "denied" || approval?.status === "expired")
@@ -364,8 +377,9 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
         requireFact(denied || validationFailed || capacityFailed || event.data.status === "cancelled" || event.data.status === "interrupted",
           "invalid-outcome", "tool outcome requires dispatch or a recorded pre-dispatch settlement");
       }
+      const activeToolIds = new Set(run.activeToolIds); activeToolIds.delete(call.callId);
       return replaceRun(previous, {
-        ...run, activeToolId: run.activeToolId === call.callId ? null : run.activeToolId,
+        ...run, activeToolIds, activeToolId: activeToolIds.values().next().value ?? null,
         blockedReason: event.data.reason === "cleanup_failed" ? "cleanup_failed" : run.blockedReason,
         tools: put(run.tools, call.callId, {
           ...call, status: event.data.status, reason: event.data.reason, result: event.data.result,
@@ -375,7 +389,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
     }
     case "step.finished": {
       const step = run.steps.get(event.data.step);
-      requireFact(step?.status === "running" && run.activeStep === step.step && run.activeRequestId === null && run.activeToolId === null,
+      requireFact(step?.status === "running" && run.activeStep === step.step && run.activeRequestId === null && run.activeToolIds.size === 0,
         "unsettled-step", "step has open children or is already settled");
       requireFact(step.callIds.every((id) => terminalTool(run.tools.get(id)!)) && !pendingApproval(run),
         "unsettled-step", "step still has tool calls or approvals to settle");
@@ -395,7 +409,7 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       });
     }
     case "run.finished": {
-      requireFact(run.activeStep === null && run.activeRequestId === null && run.activeToolId === null
+      requireFact(run.activeStep === null && run.activeRequestId === null && run.activeToolIds.size === 0
         && run.activeCompactionId === null
         && [...run.steps.values()].every((step) => step.status !== "running")
         && [...run.requests.values()].every((request) => request.status !== "running")

@@ -33,6 +33,7 @@ export interface ToolState {
   readonly arguments: JsonValue;
   readonly cwd: string;
   readonly providerCallId: string;
+  readonly executionMode: "parallel" | "exclusive";
   readonly requiresApproval: boolean;
   readonly approvalId: string | null;
   readonly status: ToolStatus;
@@ -86,6 +87,7 @@ export interface RunState {
   readonly activeStep: number | null;
   readonly activeRequestId: string | null;
   readonly activeToolId: string | null;
+  readonly activeToolIds: ReadonlySet<string>;
   readonly activeCompactionId: string | null;
   readonly compactionIds: readonly string[];
   readonly steps: ReadonlyMap<number, StepState>;

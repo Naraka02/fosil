@@ -7,6 +7,7 @@ import { buildModelRequest, replay, type ExecutionState, type RunState } from "@
 import { executeModelRequest, type ModelProvider, type ModelRequestOutcome } from "../providers/model-provider.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 import { ToolService } from "./tool-service.js";
+import { createBuiltinToolRegistry, type ToolRegistry } from "./tool-registry.js";
 import {
   buildCompactionPlan, compactionTrigger, measureContext, projectedRequestAfterCompaction,
   type ContextWindowPolicy
@@ -22,12 +23,14 @@ export interface AgentLoopOptions {
   requestTimeoutMs?: number;
   maxRequestBytes?: number;
   maxOutputBytes?: number;
+  maxParallelToolCalls?: number;
   batchMs?: number;
   batchBytes?: number;
   pollIntervalMs?: number;
   approvalTtlMs?: number;
   contextPolicy?: ContextWindowPolicy | null;
   now?: () => Date;
+  toolRegistry?: ToolRegistry;
 }
 
 export interface LoopOutcome {
@@ -51,9 +54,9 @@ const unknownUsage = () => ({ input_tokens: null, output_tokens: null, total_tok
 /** Owns accepted runs without depending on a browser, request handler, or live subscriber. */
 export class AgentLoopService {
   private readonly provider: ModelProvider;
-  private readonly context: Omit<ModelRequestContext, "messages" | "tools">;
+  private readonly context: Omit<ModelRequestContext, "messages">;
   private readonly limits: {
-    maxSteps: number; requestTimeoutMs: number; maxRequestBytes: number; maxOutputBytes: number;
+    maxSteps: number; requestTimeoutMs: number; maxRequestBytes: number; maxOutputBytes: number; maxParallelToolCalls: number;
     batchMs: number; batchBytes: number; pollIntervalMs: number;
   };
   private readonly now: () => Date;
@@ -66,14 +69,17 @@ export class AgentLoopService {
   constructor(private readonly store: SqliteWorkerStore, options: AgentLoopOptions) {
     if (!options.provider || typeof options.provider.stream !== "function") throw new StoreError("invalid_options", "A controlled provider is required");
     this.provider = options.provider;
+    const toolRegistry = options.toolRegistry ?? createBuiltinToolRegistry();
     const parsed = modelRequestContextSchema.parse({
       provider: options.providerId, model: options.model, system_instructions: options.systemInstructions ?? [],
-      settings: options.settings ?? { temperature: null, top_p: null, max_output_tokens: null }, messages: [], tools: []
+      settings: options.settings ?? { temperature: null, top_p: null, max_output_tokens: null }, messages: [], tools: toolRegistry.schemas()
     });
-    this.context = { provider: parsed.provider, model: parsed.model, system_instructions: parsed.system_instructions, settings: parsed.settings };
+    this.context = { provider: parsed.provider, model: parsed.model, system_instructions: parsed.system_instructions,
+      settings: parsed.settings, tools: parsed.tools };
     this.limits = {
       maxSteps: options.maxSteps ?? 32, requestTimeoutMs: options.requestTimeoutMs ?? 120_000,
       maxRequestBytes: options.maxRequestBytes ?? 8 * 1024 * 1024, maxOutputBytes: options.maxOutputBytes ?? 1024 * 1024,
+      maxParallelToolCalls: options.maxParallelToolCalls ?? 4,
       batchMs: options.batchMs ?? 50, batchBytes: options.batchBytes ?? 16 * 1024, pollIntervalMs: options.pollIntervalMs ?? 20
     };
     for (const value of Object.values(this.limits)) {
@@ -92,7 +98,8 @@ export class AgentLoopService {
       }
     }
     this.now = options.now ?? (() => new Date());
-    this.tools = new ToolService(store, { now: this.now, approvalTtlMs: options.approvalTtlMs ?? 300_000, signal: this.shutdown.signal });
+    this.tools = new ToolService(store, { now: this.now, approvalTtlMs: options.approvalTtlMs ?? 300_000,
+      signal: this.shutdown.signal, registry: toolRegistry });
   }
 
   /** Drives a newly accepted run; duplicate live calls join it, terminal calls only read history. */
@@ -236,23 +243,17 @@ export class AgentLoopService {
         }
         if (result.output.tool_calls.length === 0) return await this.finish(sessionId, runId, "completed", "completed", control.signal);
         try {
+          const callIds: string[] = [];
           for (const declaration of result.output.tool_calls) {
             this.checkControl(control.signal);
             run = (await this.load(sessionId, runId)).run;
             if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
-            const callId = await this.tools.prepare(sessionId, runId, declaration.provider_call_id!);
-            for (;;) {
-              this.checkControl(control.signal);
-              const advanced = await this.tools.advance(sessionId, runId, callId, control.signal);
-              if (advanced.status === "finished") break;
-              if (advanced.status === "in_progress") throw new StoreError("unowned_dispatch", "A saved tool start cannot be resumed by this loop");
-              const remaining = Math.max(1, Date.parse(advanced.expiresAt) - this.now().getTime());
-              await pause(Math.min(this.limits.pollIntervalMs, remaining), control.signal);
-            }
-            run = (await this.load(sessionId, runId)).run;
-            if (run.blockedReason === "cleanup_failed") return await this.finish(sessionId, runId, "failed", "cleanup_failed", control.signal);
-            if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
+            callIds.push(await this.tools.prepare(sessionId, runId, declaration.provider_call_id!));
           }
+          await this.dispatchToolCalls(sessionId, runId, callIds, control.signal);
+          run = (await this.load(sessionId, runId)).run;
+          if (run.blockedReason === "cleanup_failed") return await this.finish(sessionId, runId, "failed", "cleanup_failed", control.signal);
+          if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
         } catch (error) {
           if (!(error instanceof StoreError) || error.code !== "session_capacity") throw error;
           run = (await this.load(sessionId, runId)).run;
@@ -298,6 +299,61 @@ export class AgentLoopService {
         return;
       }
       await pause(this.limits.pollIntervalMs, stopped);
+    }
+  }
+
+  private async settleTool(sessionId: string, runId: string, callId: string, signal: AbortSignal): Promise<void> {
+    for (;;) {
+      this.checkControl(signal);
+      const advanced = await this.tools.advance(sessionId, runId, callId, signal);
+      if (advanced.status === "finished") return;
+      if (advanced.status === "in_progress") throw new StoreError("unowned_dispatch", "A saved tool start cannot be resumed by this loop");
+      const remaining = Math.max(1, Date.parse(advanced.expiresAt) - this.now().getTime());
+      await pause(Math.min(this.limits.pollIntervalMs, remaining), signal);
+    }
+  }
+
+  private async waitForToolStart(sessionId: string, runId: string, callId: string, signal: AbortSignal,
+    settled: () => boolean): Promise<void> {
+    for (;;) {
+      this.checkControl(signal);
+      if (settled()) return;
+      const call = (await this.load(sessionId, runId)).run.tools.get(callId);
+      if (!call) throw new StoreError("missing_call", "Prepared tool call disappeared");
+      if (call.started || !["created", "waiting_for_approval"].includes(call.status)) return;
+      await pause(this.limits.pollIntervalMs, signal);
+    }
+  }
+
+  private async dispatchToolCalls(sessionId: string, runId: string, callIds: readonly string[], signal: AbortSignal): Promise<void> {
+    let index = 0;
+    while (index < callIds.length) {
+      const run = (await this.load(sessionId, runId)).run;
+      const first = run.tools.get(callIds[index]!)!;
+      if (first.executionMode === "exclusive") {
+        await this.settleTool(sessionId, runId, first.callId, signal); index++; continue;
+      }
+      const group: string[] = [];
+      while (index < callIds.length) {
+        const current = (await this.load(sessionId, runId)).run.tools.get(callIds[index]!)!;
+        if (current.executionMode !== "parallel") break;
+        group.push(current.callId); index++;
+      }
+      const active = new Set<Promise<void>>();
+      let failed = false;
+      let failure: unknown;
+      for (const callId of group) {
+        while (active.size >= this.limits.maxParallelToolCalls) await Promise.race(active);
+        if (failed) break;
+        let tracked!: Promise<void>;
+        tracked = this.settleTool(sessionId, runId, callId, signal)
+          .catch((error) => { if (!failed) { failed = true; failure = error; } })
+          .finally(() => active.delete(tracked));
+        active.add(tracked);
+        await this.waitForToolStart(sessionId, runId, callId, signal, () => !active.has(tracked));
+      }
+      await Promise.all(active);
+      if (failed) throw failure;
     }
   }
 

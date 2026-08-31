@@ -362,6 +362,33 @@ describe("file tool service", () => {
 });
 
 describe("bounded file execution", () => {
+  it("discovers and searches bounded repository files without following protected paths", async () => {
+    const root = await directory();
+    await mkdir(join(root, "src")); await mkdir(join(root, ".git"));
+    await writeFile(join(root, "src", "a.ts"), "export const needle = 1;\n");
+    await writeFile(join(root, "src", "b.txt"), "needle\n");
+    await writeFile(join(root, ".git", "secret.ts"), "needle\n");
+    expect((await direct(root, "glob", { pattern: "**/*.ts" })).result).toEqual({ pattern: "**/*.ts", path: null, matches: ["src/a.ts"], truncated: false });
+    expect((await direct(root, "grep", { query: "needle", include: "**/*.ts" })).result).toMatchObject({
+      matches: [{ path: "src/a.ts", line: 1, column: 14 }], truncated: false
+    });
+  });
+
+  it("reads line windows, creates with confirmed absence, and performs exact literal edits", async () => {
+    const root = await directory();
+    await writeFile(join(root, "source.txt"), "one\ntwo\nthree\n");
+    expect((await direct(root, "read_file", { path: "source.txt", offset: 2, limit: 1 })).result).toMatchObject({
+      content: "two", offset: 2, returned_lines: 1, total_lines: 4, truncated: true
+    });
+    const created = await direct(root, "write_file", { path: "created.txt", expected_sha256: null, content: "alpha beta\n" });
+    expect(created.result).toMatchObject({ created: true, changed: true, sha256: hash("alpha beta\n") });
+    await expect(direct(root, "write_file", { path: "created.txt", expected_sha256: null, content: "other" })).rejects.toMatchObject({ code: "stale_preimage" });
+    await direct(root, "edit_file", { path: "created.txt", expected_sha256: hash("alpha beta\n"), old_text: "beta", new_text: "gamma" });
+    expect(await readFile(join(root, "created.txt"), "utf8")).toBe("alpha gamma\n");
+    await writeFile(join(root, "created.txt"), "x x");
+    await expect(direct(root, "edit_file", { path: "created.txt", expected_sha256: hash("x x"), old_text: "x", new_text: "y" })).rejects.toMatchObject({ code: "ambiguous_edit" });
+  });
+
   it.each(["/absolute", "../escape", "sub/../target", "sub//target", "./target", "C:/target", "sub\\target", "target\0.txt", "target\n.txt", "bad\ud800.txt", "bad\udc00.txt"])("rejects unsafe path %s", async (path) => {
     expect(() => parseFileToolInvocation({ name: "read_file", arguments: { path } })).toThrow();
   });

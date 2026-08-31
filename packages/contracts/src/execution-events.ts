@@ -245,6 +245,7 @@ export const contextCompactionFailedEventSchema = envelope("context.compaction.f
 export const toolCallCreatedEventSchema = envelope("tool.call.created", z.object({
   ...toolCorrelation, provider_call_id: id.nullable(), tool_name: id,
   arguments: jsonValueSchema, cwd: absolutePath, requires_approval: z.boolean(), approval_id: id.nullable(),
+  execution_mode: z.enum(["parallel", "exclusive"]).optional(),
   origin: z.enum(["provider", "runner"])
 }).strict());
 export const approvalRequestedEventSchema = envelope("approval.requested", z.object({

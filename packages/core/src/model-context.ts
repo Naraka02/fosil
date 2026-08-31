@@ -1,4 +1,4 @@
-import { modelRequestContextSchema, toolDefinitions, type ModelRequestContext } from "@fosil/contracts";
+import { modelRequestContextSchema, type ModelRequestContext } from "@fosil/contracts";
 import { buildModelHistory } from "./history.js";
 import type { ModelHistoryMessage } from "./history.js";
 import type { ExecutionState } from "./state.js";
@@ -8,6 +8,7 @@ export interface ModelRequestOptions {
   model: string;
   system_instructions: readonly string[];
   settings: ModelRequestContext["settings"];
+  tools: ModelRequestContext["tools"];
 }
 
 /** Assemble the provider-neutral request from authoritative, settled history. */
@@ -16,7 +17,7 @@ export function buildModelRequest(state: ExecutionState, options: ModelRequestOp
   // Parsing validates the assembled boundary; cloning also detaches JSON subtrees
   // retained by the shared JSON schema, options, and tool definitions.
   return structuredClone(modelRequestContextSchema.parse({
-    ...options, system_instructions: [...options.system_instructions], messages, tools: toolDefinitions()
+    ...options, system_instructions: [...options.system_instructions], messages, tools: structuredClone(options.tools)
   }));
 }
 
