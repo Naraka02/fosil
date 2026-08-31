@@ -26,7 +26,7 @@ The title remains a replay projection rather than mutable metadata. It uses alre
 
 New sessions show a stable fallback until their first non-whitespace submission is durable, then acquire a compact content-derived name. Existing sessions gain names immediately when their histories are replayed, and later activity does not change those names. The shared summary contract gains a required `title` field, while the database remains at `user_version = 1` and keeps no duplicate title state.
 
-Title listing already replays each returned session to validate its storage index, so derivation adds no extra database round trip but retains the existing full-history listing cost. Explicit rename, deletion, search, and date grouping remain unavailable.
+Title listing already replays each returned session to validate its storage index, so derivation adds no extra database round trip but retains the existing full-history listing cost. Explicit rename, search, and date grouping remain unavailable; deletion removes the complete titled session rather than editing title state.
 
 ## Verification
 

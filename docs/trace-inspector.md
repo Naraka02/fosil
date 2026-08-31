@@ -22,7 +22,7 @@ Saved `file_change` evidence receives a dedicated diff panel. Other evidence rem
 
 Trace surfaces explicit retained fields whose names identify truncation, masking, omission, invalid encoding, or incompleteness. A recorded `false` remains visible. Absence of a matching field means only that no explicit flag was retained; it does not prove completeness or absence of sensitive content.
 
-The application still loads a complete selected-session prefix of bounded browser projections into memory and has no session deletion, export, recovery-blocker resolution, payload search, virtualization, or large-session performance guarantee. Configured-secret masking, shared content metadata, retained-payload budgets, and the product launcher are implemented at their owning service boundaries. Arbitrary shell changes remain unknown evidence rather than automatically attributed diffs.
+The application still loads a complete selected-session prefix of bounded browser projections into memory and has no payload export, recovery-blocker resolution, payload search, virtualization, or large-session performance guarantee. Explicit record deletion belongs to [Chat controls](chat-controls.md#command-behavior) and removes the corresponding Trace source rather than editing Trace independently. Configured-secret masking, shared content metadata, retained-payload budgets, and the product launcher are implemented at their owning service boundaries. Arbitrary shell changes remain unknown evidence rather than automatically attributed diffs.
 
 ## Verification
 

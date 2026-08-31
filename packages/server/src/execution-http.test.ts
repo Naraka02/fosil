@@ -90,6 +90,51 @@ async function stream(origin: string, sessionId: string, after = "0", headers: R
 }
 
 describe("execution HTTP commands and reads", () => {
+  it("deletes session and workspace history through same-origin confirmations without deleting local files", async () => {
+    const f = await fixture();
+    const marker = join(f.root, "keep.txt"); await writeFile(marker, "keep");
+    const first = await f.create("delete-first"), second = await f.create("delete-second");
+    const mutate = (path: string, body: unknown) => fetch(f.origin + path, {
+      method: "POST", headers: { origin: f.origin, "content-type": "application/json" }, body: JSON.stringify(body)
+    });
+    const deletedSession = await mutate(`/api/sessions/${first.session_id}/delete`, {});
+    expect(deletedSession.status).toBe(200);
+    expect(await deletedSession.json()).toEqual({ deleted_session_ids: [first.session_id] });
+    expect(await readFile(marker, "utf8")).toBe("keep");
+    const deletedWorkspace = await mutate("/api/workspaces/delete", { workspace_root: f.root });
+    expect(deletedWorkspace.status).toBe(200);
+    expect(await deletedWorkspace.json()).toEqual({ deleted_session_ids: [second.session_id] });
+    expect(await readFile(marker, "utf8")).toBe("keep");
+    expect((await f.store.listSessions()).sessions).toEqual([]);
+  });
+
+  it("configures a process-local provider credential without echoing it and masks subsequent persistence", async () => {
+    let credential: string | null = null;
+    const providerCredentials = {
+      status: () => credential === null
+        ? ({ configured: false, source: "none" } as const)
+        : ({ configured: true, source: "webui" } as const),
+      configure: (apiKey: string) => { credential = apiKey; }
+    };
+    const f = await fixture(undefined, { providerCredentials });
+    expect(await (await fetch(f.origin + "/api/status")).json()).toMatchObject({ api_key: { configured: false, source: "none" } });
+    const secret = "runtime-webui-secret";
+    const response = await fetch(f.origin + "/api/provider/credential", {
+      method: "POST", headers: { origin: f.origin, "content-type": "application/json" }, body: JSON.stringify({ api_key: secret })
+    });
+    expect(response.status).toBe(200);
+    const responseText = await response.text();
+    expect(responseText).toBe(JSON.stringify({ configured: true, source: "webui" }));
+    expect(responseText).not.toContain(secret);
+    const session = await f.create();
+    const run = await f.send({ type: "run.submit", command_id: "masked-run", session_id: session.session_id, content: `Do not retain ${secret}` });
+    await until(async () => (await f.store.getSession(session.session_id))?.active_run_id === null);
+    const events = await f.store.read(session.session_id);
+    expect(events.find((event) => event.type === "user.message")).toMatchObject({ data: { content: "Do not retain [MASKED]" } });
+    expect(JSON.stringify(events)).not.toContain(secret);
+    expect(run.run_id).not.toBeNull();
+  });
+
   it("lists local workspace directories without exposing files or poisoning the service on an unavailable path", async () => {
     const f = await fixture();
     await Promise.all([mkdir(join(f.root, "project-b")), mkdir(join(f.root, "project-a")), writeFile(join(f.root, "private.txt"), "secret")]);
@@ -391,7 +436,9 @@ describe("durable event SSE", () => {
     const s = await stream(f.origin, session_id);
     await until(() => s.response.destroyed);
     expect(s.events).toEqual([]);
-    expect(await (await fetch(f.origin + "/api/status")).json()).toEqual({ status: "ready", model: "fixture" });
+    expect(await (await fetch(f.origin + "/api/status")).json()).toEqual({
+      status: "ready", model: "fixture", api_key: { configured: false, source: "none" }
+    });
     expect((await f.store.read(session_id))).toHaveLength(1);
   });
 

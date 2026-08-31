@@ -6,17 +6,17 @@ This reference owns the product launcher, DeepSeek model routing, vendor request
 
 ## Product launcher
 
-`npm start -- [options]` builds the packages and starts the browser application and execution API on numeric IPv4 loopback. `DEEPSEEK_API_KEY` is required in the process environment. Secret values are never accepted as command-line arguments. The launcher refuses provider contact when `NODE_TLS_REJECT_UNAUTHORIZED=0`.
+`npm start -- [options]` builds the packages and starts the browser application and execution API on numeric IPv4 loopback. `DEEPSEEK_API_KEY` is optional at startup; when absent, the service starts with model dispatch failing closed until the operator configures a key in WebUI. Secret values are never accepted as command-line arguments. The launcher refuses provider contact when `NODE_TLS_REJECT_UNAUTHORIZED=0`.
 
 | Option | Default | Behavior |
 | --- | --- | --- |
 | `--database PATH` | `.fosil/events.db` | Resolve the local SQLite path from the startup directory and create its parent directory when needed |
 | `--port PORT` | `7860` | Bind the exact loopback port; `0` requests an ephemeral port |
 | `--model deepseek-v4-flash\|deepseek-v4-pro` | `deepseek-v4-flash` | Select the execution model once at startup; the loop does not switch models automatically |
-| `--mask-env NAME` | none beyond the provider key | Add the value of a set uppercase environment variable to exact-value masking; repeat the option for more names |
+| `--mask-env NAME` | none | Add the value of a set uppercase environment variable to exact-value masking; repeat the option for more names; a present provider environment key is always included |
 | `--help` | false | Print usage without requiring a key, opening storage, listening, or contacting the provider |
 
-The launcher configures high reasoning and a 64,000-token maximum output for execution. Its coding instructions require repository inspection, preservation of unrelated work, evidence-backed verification, no unrequested Git delivery, and a concise result report. Repository instructions, source files, skills, and directory contents are not injected automatically; the agent must read relevant files through its tools.
+The launcher configures high reasoning and a 64,000-token maximum output for execution. `RuntimeDeepSeekProvider` owns the current process-local delegate: an environment key initializes it with source `environment`, while the same-origin WebUI can replace it with source `webui`. Status exposes only configured/source fields. The WebUI value is not persisted and must be configured again after restart. Before replacement becomes available to model calls, the HTTP host adds its exact value to dynamic persistence masking. Its coding instructions require repository inspection, preservation of unrelated work, evidence-backed verification, no unrequested Git delivery, and a concise result report. Repository instructions, source files, skills, and directory contents are not injected automatically; the agent must read relevant files through its tools.
 
 ## Request translation
 
@@ -48,7 +48,7 @@ The completed response is authoritative. The adapter aggregates output text and 
 
 Before dispatch, the adapter records its protocol, adapter revision, official endpoint, and SHA-256 digest of the credential-free JSON request body. On settlement it records the provider response identity, status, model, normalized output, usage, timings, and a bounded semantic error. It does not retain the authorization header, API key, raw request headers, raw SSE frames, packet data, arbitrary exception objects, or an unvalidated response body.
 
-The store masks exact configured secret values in content-bearing fields before persistence and before later model reuse. The provider key is always in that masking set. This is exact-value filtering, not automatic discovery of credentials embedded in source files.
+The store masks exact configured secret values in content-bearing fields before persistence and before later model reuse. Every environment or WebUI provider key used in the current process is added to that masking set. This is exact-value filtering, not automatic discovery of credentials embedded in source files.
 
 ## Failure and retry boundary
 

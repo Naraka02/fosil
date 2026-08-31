@@ -25,6 +25,8 @@ function dispatch(message: WorkerRequest): unknown {
     case "history_page": return requireDatabase().readPage(message.request);
     case "session": return requireDatabase().getSession(message.sessionId);
     case "sessions": return requireDatabase().listSessions(message.request);
+    case "delete_session": return requireDatabase().deleteSession(message.sessionId);
+    case "delete_workspace": return requireDatabase().deleteWorkspace(message.workspaceRoot);
     case "close":
       database?.close();
       database = undefined;

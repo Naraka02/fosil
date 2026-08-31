@@ -2,9 +2,9 @@ import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deepSeekContextPolicy } from "./context-compaction.js";
-import { DeepSeekResponsesProvider } from "./deepseek-responses.js";
 import { ExecutionHttpServer } from "./execution-http.js";
 import { parseProductConfig, productHelp } from "./product-config.js";
+import { RuntimeDeepSeekProvider } from "./runtime-deepseek-provider.js";
 import { SqliteWorkerStore } from "./store.js";
 
 const codingInstructions = [
@@ -26,10 +26,10 @@ async function main(): Promise<void> {
   let server: ExecutionHttpServer | undefined;
   try {
     await store.open(config.database);
-    const provider = new DeepSeekResponsesProvider({ apiKey: config.apiKey });
+    const provider = new RuntimeDeepSeekProvider(config.apiKey);
     const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
     server = new ExecutionHttpServer({
-      store, webRoot,
+      store, webRoot, providerCredentials: provider,
       loop: {
         provider, providerId: "deepseek-official", model: config.model, systemInstructions: codingInstructions,
         settings: { temperature: null, top_p: null, max_output_tokens: 64_000, reasoning_effort: "high" },

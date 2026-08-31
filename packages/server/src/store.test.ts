@@ -108,6 +108,38 @@ async function childResult(source: string): Promise<{ child: ChildProcess; resul
 }
 
 describe("SQLite worker store", () => {
+  it("deletes complete session and workspace records atomically without touching local files", async () => {
+    const path = await databasePath(); const root = dirname(path); const marker = join(root, "keep.txt");
+    await writeFile(marker, "keep");
+    const store = createStore(); await store.open(path);
+    const first = await createSession(store, path, "create-first");
+    const second = await createSession(store, path, "create-second");
+    const run = await store.execute({ type: "run.submit", session_id: first.session_id, command_id: "run-first", content: "Inspect" });
+    await store.append(input("run.finished", { run_id: run.run_id, status: "failed", reason: "runner_error", origin: "runner" }, first.session_id));
+
+    expect(await store.deleteSession(first.session_id)).toEqual({ deleted_session_ids: [first.session_id] });
+    expect(await store.getSession(first.session_id)).toBeNull();
+    expect(await readFile(marker, "utf8")).toBe("keep");
+    const recreated = await createSession(store, path, "create-first");
+    expect(recreated.session_id).not.toBe(first.session_id);
+
+    const deleted = await store.deleteWorkspace(root);
+    expect(deleted.deleted_session_ids.sort()).toEqual([recreated.session_id, second.session_id].sort());
+    expect(await store.listSessions()).toEqual({ sessions: [], next_after: null });
+    expect(await readFile(marker, "utf8")).toBe("keep");
+    await store.close();
+    expect(counts(path)).toEqual({ sessions: 0, events: 0, payloads: 0, command_receipts: 0 });
+  });
+
+  it("rejects a workspace deletion as one unit while any targeted session is active", async () => {
+    const path = await databasePath(); const store = createStore(); await store.open(path);
+    const idle = await createSession(store, path, "create-idle");
+    const active = await createSession(store, path, "create-active");
+    await store.execute({ type: "run.submit", session_id: active.session_id, command_id: "active-run", content: "Wait" });
+    await expect(store.deleteWorkspace(dirname(path))).rejects.toMatchObject({ code: "session_busy" });
+    expect((await store.listSessions()).sessions.map((session) => session.session_id).sort()).toEqual([active.session_id, idle.session_id].sort());
+  });
+
   it("persists an explicit per-run approval mode and defaults omitted commands to manual", async () => {
     const path = await databasePath(); const store = createStore(); await store.open(path);
     const explicitSession = await createSession(store, path, "create-explicit");

@@ -1,6 +1,8 @@
 import {
-  apiErrorSchema, commandAckSchema, directoryListingSchema, eventSchema, historyPageSchema, serviceStatusSchema, sessionListSchema,
-  type Command, type CommandAck, type DirectoryListing, type Event, type ServiceStatus, type SessionList, type SessionSummary
+  apiErrorSchema, commandAckSchema, deletionResultSchema, directoryListingSchema, eventSchema, historyPageSchema,
+  providerCredentialStatusSchema, serviceStatusSchema, sessionListSchema,
+  type Command, type CommandAck, type DeletionResult, type DirectoryListing, type Event, type ProviderCredentialStatus,
+  type ServiceStatus, type SessionList, type SessionSummary
 } from "@fosil/contracts";
 import { appendCanonicalEvent } from "./chat-model.js";
 
@@ -75,6 +77,33 @@ export async function sendCommand(command: Command): Promise<CommandAck> {
     if (!correlated) throw new Error("receipt correlation mismatch");
     return ack;
   } catch { throw new CommandDeliveryError("The service returned an invalid command receipt", true); }
+}
+
+async function sendMutation<T>(path: string, body: unknown, schema: { parse(value: unknown): T }): Promise<T> {
+  let response: Response;
+  try { response = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }); }
+  catch { throw new CommandDeliveryError("Could not reach the execution service", true); }
+  let result: unknown;
+  try { result = await responseJson(response); }
+  catch (failure) { throw new CommandDeliveryError(failure instanceof Error ? failure.message : "Mutation response was invalid", true); }
+  if (!response.ok) {
+    const failure = apiErrorSchema.safeParse(result);
+    throw new CommandDeliveryError(failure.success ? failure.data.error.message : `Mutation failed with HTTP ${response.status}`, false);
+  }
+  try { return schema.parse(result); }
+  catch { throw new CommandDeliveryError("The service returned an invalid mutation response", true); }
+}
+
+export function deleteSession(sessionId: string): Promise<DeletionResult> {
+  return sendMutation(`/api/sessions/${encodeURIComponent(sessionId)}/delete`, {}, deletionResultSchema);
+}
+
+export function deleteWorkspace(workspaceRoot: string): Promise<DeletionResult> {
+  return sendMutation("/api/workspaces/delete", { workspace_root: workspaceRoot }, deletionResultSchema);
+}
+
+export function configureProviderCredential(apiKey: string): Promise<ProviderCredentialStatus> {
+  return sendMutation("/api/provider/credential", { api_key: apiKey }, providerCredentialStatusSchema);
 }
 
 export function parseStreamEvent(value: string): Event { return eventSchema.parse(JSON.parse(value)); }

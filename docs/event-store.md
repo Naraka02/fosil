@@ -69,7 +69,7 @@ The connection uses WAL and `synchronous = FULL`. A newly created database file 
 
 ## Content masking and retention
 
-`StoreOptions.maskSecrets` configures exact string values that become `[MASKED]` in content-bearing user, model, compaction, tool, evidence, and bounded-error fields before persistence. Values are deduplicated, processed longest first, and must contain at least eight UTF-8 bytes and differ from the replacement marker. `run.submit` is masked before its acceptance transaction; trusted event appends pass through the same policy. Masked content is therefore also what later model-history assembly reuses.
+`StoreOptions.maskSecrets` configures initial exact string values that become `[MASKED]` in content-bearing user, model, compaction, tool, evidence, and bounded-error fields before persistence. `addMaskSecret` registers an additional process-memory value synchronously before a runtime credential becomes usable. Values are deduplicated, processed longest first, and must contain at least eight UTF-8 bytes and differ from the replacement marker. `run.submit` is masked before its acceptance transaction; trusted event appends pass through the same policy. Masked content is therefore also what later model-history assembly reuses.
 
 Each affected field receives `content_metadata` with its JSON-pointer path, masking count, original and retained UTF-8 byte counts, and SHA-256 digest of the masked retained representation. The same schema also records producer or browser truncation and omission. Metadata contains no original secret. Exact masking does not discover unconfigured credentials, source-code secrets, personal data, encoded variants, or transformed values. Producers still must not retain raw authentication headers or transport frames.
 
@@ -77,7 +77,7 @@ The default normal retained-payload budget is 240 MiB per session. A 256 MiB har
 
 The normal budget prevents another provider or tool dispatch and the loop attempts to close the active lifecycle through the terminal reserve with `limit_exceeded`. The reserve is capacity, not a guarantee against disk failure or an exceptionally large terminal record. Immutable source events, deltas, tool results, and compaction records all count; a successful checkpoint reclaims no capacity. `StoreOptions` may lower or raise both positive safe-integer budgets when the hard value remains greater than the normal value.
 
-Saved sessions have no age-based deletion, payload export, or product deletion workflow. The browser receives bounded projections through the [HTTP boundary](http-service.md), while direct store reads and model projection use the full canonical retained event after producer limits and masking.
+Saved sessions have no automatic age-based deletion or payload export. Explicit session and exact-root workspace deletion is available through the [same-origin HTTP boundary](http-service.md#http-interface). It first requires every target to be idle and free of unresolved workspace outcomes, then removes session indexes, events, payloads, session receipts, and corresponding store-scoped creation receipts atomically. Deletion never targets workspace files. The browser otherwise receives bounded projections through the HTTP boundary, while direct store reads and model projection use the full canonical retained event after producer limits and masking.
 
 ## Capacity, failure, and restart
 

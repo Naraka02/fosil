@@ -9,6 +9,8 @@ export type WorkerCommand =
   | { type: "history_page"; request: HistoryPageRequest }
   | { type: "session"; sessionId: string }
   | { type: "sessions"; request: SessionListRequest }
+  | { type: "delete_session"; sessionId: string }
+  | { type: "delete_workspace"; workspaceRoot: string }
   | { type: "close" };
 
 export type WorkerRequest = WorkerCommand & { id: number };

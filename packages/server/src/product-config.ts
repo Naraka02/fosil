@@ -5,7 +5,7 @@ export interface ProductConfig {
   database: string;
   port: number;
   model: DeepSeekModel;
-  apiKey: string;
+  apiKey: string | null;
   maskSecrets: readonly string[];
   help: boolean;
 }
@@ -17,10 +17,10 @@ Options:
   --port PORT                     Loopback HTTP port (default: 7860)
   --model deepseek-v4-flash|deepseek-v4-pro
                                   Execution model (default: deepseek-v4-flash)
-  --mask-env NAME                 Mask the value of another environment variable; repeatable
+  --mask-env NAME                 Mask the value of an environment variable; repeatable
   --help                          Show this help
 
-DEEPSEEK_API_KEY is required unless --help is used. Secret values are never accepted as arguments.`;
+DEEPSEEK_API_KEY may be set at startup or configured later in WebUI. Secret values are never accepted as arguments.`;
 
 function valueAfter(args: readonly string[], index: number): string {
   const value = args[index + 1];
@@ -34,7 +34,7 @@ export function parseProductConfig(args: readonly string[], environment: NodeJS.
   let port = 7860;
   let model: DeepSeekModel = "deepseek-v4-flash";
   let help = false;
-  const maskNames = new Set<string>(["DEEPSEEK_API_KEY"]);
+  const maskNames = new Set<string>();
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
     if (argument === "--help") { help = true; continue; }
@@ -61,9 +61,11 @@ export function parseProductConfig(args: readonly string[], environment: NodeJS.
     }
     throw new TypeError(`Unknown option: ${argument}`);
   }
-  const apiKey = environment.DEEPSEEK_API_KEY ?? "";
-  if (!help && Buffer.byteLength(apiKey, "utf8") < 8) throw new TypeError("DEEPSEEK_API_KEY is required");
+  const configuredApiKey = environment.DEEPSEEK_API_KEY;
+  const apiKey = configuredApiKey === undefined ? null : configuredApiKey;
+  if (!help && apiKey !== null && Buffer.byteLength(apiKey, "utf8") < 8) throw new TypeError("DEEPSEEK_API_KEY is shorter than eight UTF-8 bytes");
   const maskSecrets: string[] = [];
+  if (!help && apiKey !== null) maskSecrets.push(apiKey);
   if (!help) for (const name of maskNames) {
     const value = environment[name];
     if (value === undefined) throw new TypeError(`Configured mask environment variable is not set: ${name}`);

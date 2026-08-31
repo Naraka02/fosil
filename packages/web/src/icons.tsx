@@ -24,3 +24,5 @@ export const CloseIcon = (props: IconProps) => <Icon {...props}><path d="m6 6 12
 export const FolderIcon = (props: IconProps) => <Icon {...props}><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V6.5Z" /></Icon>;
 export const PermissionIcon = (props: IconProps) => <Icon {...props}><path d="M5 4.5h10l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 19V6a1.5 1.5 0 0 1 1-1.5Z" /><path d="M14.5 4.5V9H19M8 13.2l2.1 2.1 4.4-4.6" /></Icon>;
 export const CheckIcon = (props: IconProps) => <Icon {...props}><path d="m5 12 4.2 4.2L19 6.8" /></Icon>;
+export const TrashIcon = (props: IconProps) => <Icon {...props}><path d="M4.5 7h15M9 7V4.5h6V7M7 7l.7 13h8.6L17 7M10 10.5v6M14 10.5v6" /></Icon>;
+export const KeyIcon = (props: IconProps) => <Icon {...props}><circle cx="8.5" cy="12" r="4" /><path d="M12.5 12H21M17 12v3M19.5 12v2" /></Icon>;

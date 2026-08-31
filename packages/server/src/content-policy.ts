@@ -9,19 +9,23 @@ const digest = (value: string) => createHash("sha256").update(value, "utf8").dig
 const pointer = (value: string) => value.replaceAll("~", "~0").replaceAll("/", "~1");
 
 export class ConfiguredSecretMasker {
-  private readonly secrets: readonly string[];
+  private readonly secrets: string[] = [];
 
   constructor(values: readonly string[]) {
-    const unique = [...new Set(values)];
-    for (const value of unique) {
-      if (Buffer.byteLength(value, "utf8") < 8 || value === replacement) {
-        throw new RangeError("Configured masking values must contain at least eight UTF-8 bytes and cannot equal the replacement marker");
-      }
-    }
-    this.secrets = unique.sort((left, right) => right.length - left.length);
+    for (const value of values) this.add(value);
   }
 
   get active(): boolean { return this.secrets.length > 0; }
+
+  /** Register a runtime secret before any operation can persist content containing it. */
+  add(value: string): void {
+    if (Buffer.byteLength(value, "utf8") < 8 || value === replacement) {
+      throw new RangeError("Configured masking values must contain at least eight UTF-8 bytes and cannot equal the replacement marker");
+    }
+    if (this.secrets.includes(value)) return;
+    this.secrets.push(value);
+    this.secrets.sort((left, right) => right.length - left.length);
+  }
 
   maskString(value: string, path: string): { value: string; metadata: ContentMetadata[] } {
     let retained = value;

@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import { commandAckSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, parseCommand, parseEvent, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
+import { commandAckSchema, deletionResultSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, workspaceDeleteRequestSchema, parseCommand, parseEvent, type Command, type CommandAck, type DeletionResult, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
 import { isWorkerResponse, StoreError, type RecoveryReport, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
 import { ConfiguredSecretMasker, maskEventInput } from "./content-policy.js";
 
@@ -81,6 +81,9 @@ export class SqliteWorkerStore {
   /** Returns the exact content-policy projection that append will validate and persist. */
   sanitizeEventInput(event: EventInput): EventInput { return maskEventInput(event, this.masker); }
 
+  /** Adds a process-memory-only exact secret to all subsequent persistence masking. */
+  addMaskSecret(secret: string): void { this.masker.add(secret); }
+
   async appendBatch(events: readonly EventInput[]): Promise<Event[]> {
     const sanitized = events.map((event) => this.sanitizeEventInput(event));
     const result = await this.call({ type: "append_batch", events: sanitized });
@@ -123,6 +126,16 @@ export class SqliteWorkerStore {
 
   async listSessions(request: SessionListRequest = {}): Promise<SessionList> {
     return sessionListSchema.parse(await this.call({ type: "sessions", request }));
+  }
+
+  async deleteSession(sessionId: string): Promise<DeletionResult> {
+    const parsed = sessionSummarySchema.shape.session_id.parse(sessionId);
+    return deletionResultSchema.parse(await this.call({ type: "delete_session", sessionId: parsed }));
+  }
+
+  async deleteWorkspace(workspaceRoot: string): Promise<DeletionResult> {
+    const parsed = workspaceDeleteRequestSchema.parse({ workspace_root: workspaceRoot });
+    return deletionResultSchema.parse(await this.call({ type: "delete_workspace", workspaceRoot: parsed.workspace_root }));
   }
 
   close(): Promise<void> {

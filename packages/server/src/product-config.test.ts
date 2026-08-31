@@ -20,9 +20,10 @@ describe("product launcher configuration", () => {
     expect(() => parseProductConfig(["--api-key", "plaintext-secret"], {}, "/tmp")).toThrow(/Unknown option/u);
   });
 
-  it("shows help without reading a credential but rejects missing or short configured masks for execution", () => {
+  it("starts without a credential for later WebUI setup but rejects short configured secrets", () => {
     expect(parseProductConfig(["--help"], {}, "/tmp").help).toBe(true);
-    expect(() => parseProductConfig([], {}, "/tmp")).toThrow(/DEEPSEEK_API_KEY/u);
+    expect(parseProductConfig([], {}, "/tmp")).toMatchObject({ apiKey: null, maskSecrets: [], help: false });
+    expect(() => parseProductConfig([], { DEEPSEEK_API_KEY: "tiny" }, "/tmp")).toThrow(/shorter/u);
     expect(() => parseProductConfig(["--mask-env", "SHORT"], {
       DEEPSEEK_API_KEY: "deepseek-fixture-key", SHORT: "tiny"
     }, "/tmp")).toThrow(/shorter/u);

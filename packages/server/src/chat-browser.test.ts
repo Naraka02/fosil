@@ -41,6 +41,69 @@ afterEach(async () => {
 });
 
 describe("product Chat controls in a real browser", () => {
+  it("configures a non-echoed API key and confirms record-only session and workspace deletion", async () => {
+    await access(join(webRoot, "index.html"));
+    const root = await mkdtemp(join(tmpdir(), "fosil-settings-browser-")); directories.push(root);
+    const marker = join(root, "workspace-file.txt"); await writeFile(marker, "preserved");
+    const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
+    let configuredKey: string | null = null;
+    const providerCredentials = {
+      status: () => configuredKey === null
+        ? ({ configured: false, source: "none" } as const)
+        : ({ configured: true, source: "webui" } as const),
+      configure: (apiKey: string) => { configuredKey = apiKey; }
+    };
+    const provider: ModelProvider = { async *stream() { yield finish("Saved reply."); } };
+    const server = new ExecutionHttpServer({ store, webRoot, providerCredentials,
+      loop: { provider, providerId: "controlled-settings", model: "fixture", pollIntervalMs: 5, batchMs: 5 }, streamPollMs: 5 });
+    servers.push(server); const origin = await server.listen();
+    const browser = await chromium.launch({ headless: true }); browsers.push(browser);
+    const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "模型与 API", exact: true }).click();
+    await page.getByText("尚未配置 API Key").waitFor();
+    const secret = "browser-runtime-secret";
+    await page.getByLabel("DeepSeek API Key").fill(secret);
+    expect(await page.getByLabel("DeepSeek API Key").getAttribute("type")).toBe("password");
+    await page.getByRole("button", { name: "保存 API Key", exact: true }).click();
+    await page.getByText(/已保存到当前后端进程内存/u).waitFor();
+    expect(configuredKey).toBe(secret);
+    expect(await page.getByLabel("DeepSeek API Key").inputValue()).toBe("");
+    expect(JSON.stringify(await page.evaluate(() => ({ ...localStorage })))).not.toContain(secret);
+    expect(JSON.stringify(await (await fetch(origin + "/api/status")).json())).not.toContain(secret);
+    await page.getByLabel("关闭").click();
+
+    const create = async () => {
+      await page.locator(".new-session-button").click();
+      await page.getByLabel("工作区路径").fill(root);
+      await page.getByRole("button", { name: "转到", exact: true }).click();
+      await page.locator(".directory-browser > header").getByText(root, { exact: true }).waitFor();
+      await page.getByRole("button", { name: "在此创建会话", exact: true }).click();
+      await page.locator(".session.active").waitFor();
+    };
+    await create();
+    await page.getByLabel("消息").fill("First saved session");
+    await page.getByRole("button", { name: "发送" }).click();
+    await page.getByText("Saved reply.").waitFor();
+    await create();
+    await page.locator(".session-row").filter({ has: page.locator(".session.active") }).getByRole("button", { name: /删除会话：/u }).click();
+    await page.getByRole("heading", { name: "删除会话记录" }).waitFor();
+    expect(await page.getByText("本地工作区目录和源文件不会被删除。").count()).toBe(1);
+    await page.getByRole("button", { name: "删除会话", exact: true }).click();
+    await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(1);
+    expect(await readFile(marker, "utf8")).toBe("preserved");
+
+    await page.getByRole("button", { name: /删除工作区记录：/u }).click();
+    await page.getByRole("heading", { name: "删除工作区记录" }).waitFor();
+    await page.getByRole("button", { name: "删除工作区记录", exact: true }).click();
+    await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(0);
+    await page.getByText(/还没有会话/u).waitFor();
+    expect(await readFile(marker, "utf8")).toBe("preserved");
+    expect(JSON.stringify(await store.listSessions())).not.toContain(secret);
+  }, 30_000);
+
   it("streams saved output and never resubmits or revives an approval across refresh", async () => {
     await access(join(webRoot, "index.html"));
     const root = await mkdtemp(join(tmpdir(), "fosil-chat-browser-")); directories.push(root);

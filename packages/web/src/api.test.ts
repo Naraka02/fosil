@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadDirectories, loadServiceStatus, sendCommand } from "./api.js";
+import { configureProviderCredential, deleteSession, deleteWorkspace, loadDirectories, loadServiceStatus, sendCommand } from "./api.js";
 
 const command = { type: "run.submit", command_id: "command", session_id: "session", content: "Inspect" } as const;
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -7,10 +7,27 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Chat command delivery", () => {
   it("accepts only real runtime status including the launcher model", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ status: "ready", model: "deepseek-chat" })));
-    await expect(loadServiceStatus()).resolves.toEqual({ status: "ready", model: "deepseek-chat" });
+    const status = { status: "ready", model: "deepseek-chat", api_key: { configured: false, source: "none" } } as const;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(status)));
+    await expect(loadServiceStatus()).resolves.toEqual(status);
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response({ status: "ready" })));
     await expect(loadServiceStatus()).rejects.toThrow();
+  });
+
+  it("sends deletion and credential mutations once and validates non-secret acknowledgements", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(response({ deleted_session_ids: ["session"] }))
+      .mockResolvedValueOnce(response({ deleted_session_ids: ["a", "b"] }))
+      .mockResolvedValueOnce(response({ configured: true, source: "webui" }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(deleteSession("session")).resolves.toEqual({ deleted_session_ids: ["session"] });
+    await expect(deleteWorkspace("/work/project")).resolves.toEqual({ deleted_session_ids: ["a", "b"] });
+    await expect(configureProviderCredential("runtime-secret-key")).resolves.toEqual({ configured: true, source: "webui" });
+    expect(fetch.mock.calls).toEqual([
+      ["/api/sessions/session/delete", expect.objectContaining({ method: "POST", body: "{}" })],
+      ["/api/workspaces/delete", expect.objectContaining({ method: "POST", body: JSON.stringify({ workspace_root: "/work/project" }) })],
+      ["/api/provider/credential", expect.objectContaining({ method: "POST", body: JSON.stringify({ api_key: "runtime-secret-key" }) })]
+    ]);
   });
 
   it("loads and validates local workspace directories", async () => {

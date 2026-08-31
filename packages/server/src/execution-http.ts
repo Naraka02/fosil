@@ -3,8 +3,10 @@ import { readFile } from "node:fs/promises";
 import { realpathSync, statSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import {
-  commandSchema, directoryListingQuerySchema, directoryListingSchema, historyPageRequestSchema, historyPageSchema, historyQuerySchema,
-  sequenceTextSchema, sessionListQuerySchema, sessionParamsSchema, streamQuerySchema, type Command, type CommandAck
+  commandSchema, deletionResultSchema, directoryListingQuerySchema, directoryListingSchema, emptyMutationSchema,
+  historyPageRequestSchema, historyPageSchema, historyQuerySchema, providerCredentialRequestSchema, providerCredentialStatusSchema,
+  sequenceTextSchema, sessionListQuerySchema, sessionParamsSchema, streamQuerySchema, workspaceDeleteRequestSchema,
+  type Command, type CommandAck, type ProviderCredentialStatus
 } from "@fosil/contracts";
 import { AgentLoopService, type AgentLoopOptions } from "./agent-loop.js";
 import { listLocalDirectories, LocalDirectoryError } from "./local-directories.js";
@@ -15,6 +17,7 @@ import { browserEventPreview } from "./browser-preview.js";
 export interface ExecutionHttpOptions {
   store: SqliteWorkerStore;
   loop: AgentLoopOptions;
+  providerCredentials?: ProviderCredentialController;
   bodyLimitBytes?: number;
   maxStreams?: number;
   streamPollMs?: number;
@@ -22,6 +25,11 @@ export interface ExecutionHttpOptions {
   maxFrameBytes?: number;
   drainTimeoutMs?: number;
   webRoot?: string;
+}
+
+export interface ProviderCredentialController {
+  status(): ProviderCredentialStatus;
+  configure(apiKey: string, source: "webui"): void;
 }
 
 class HttpError extends Error {
@@ -44,6 +52,7 @@ export class ExecutionHttpServer {
   private readonly limits;
   private readonly webRoot: string | undefined;
   private readonly model: string;
+  private readonly providerCredentials: ProviderCredentialController | undefined;
   private authority: string | undefined;
   private phase: "ready" | "failed" | "stopping" = "ready";
   private readonly commands = new Set<Promise<CommandAck>>();
@@ -62,6 +71,7 @@ export class ExecutionHttpServer {
     }
     this.webRoot = this.resolveWebRoot(options.webRoot);
     this.model = options.loop.model;
+    this.providerCredentials = options.providerCredentials;
     this.store = options.store;
     // Construction requires a store that has completed its recovery barrier.
     void this.store.protectedFiles;
@@ -109,7 +119,17 @@ export class ExecutionHttpServer {
         return this.staticFile(reply, join("assets", name), type);
       });
     }
-    this.app.get("/api/status", async () => ({ status: this.phase, model: this.model }));
+    this.app.get("/api/status", async () => ({
+      status: this.phase, model: this.model,
+      api_key: providerCredentialStatusSchema.parse(this.providerCredentials?.status() ?? { configured: false, source: "none" })
+    }));
+    this.app.post("/api/provider/credential", async (request) => {
+      if (!this.providerCredentials) throw new HttpError(404, "configuration_unavailable", "Runtime provider configuration is unavailable");
+      const { api_key } = parse(providerCredentialRequestSchema, request.body);
+      this.store.addMaskSecret(api_key);
+      this.providerCredentials.configure(api_key, "webui");
+      return providerCredentialStatusSchema.parse(this.providerCredentials.status());
+    });
     this.app.get("/api/workspaces/directories", async (request) => {
       const query = parse(directoryListingQuerySchema, request.query);
       try { return directoryListingSchema.parse(await listLocalDirectories(query.path)); }
@@ -128,6 +148,15 @@ export class ExecutionHttpServer {
       const session = await this.store.getSession(sessionId);
       if (!session) throw new HttpError(404, "session_not_found", "Session does not exist");
       return session;
+    });
+    this.app.post("/api/sessions/:sessionId/delete", async (request) => {
+      const { sessionId } = parse(sessionParamsSchema, request.params);
+      parse(emptyMutationSchema, request.body);
+      return deletionResultSchema.parse(await this.store.deleteSession(sessionId));
+    });
+    this.app.post("/api/workspaces/delete", async (request) => {
+      const { workspace_root } = parse(workspaceDeleteRequestSchema, request.body);
+      return deletionResultSchema.parse(await this.store.deleteWorkspace(workspace_root));
     });
     this.app.get("/api/sessions/:sessionId/history", async (request) => {
       const { sessionId } = parse(sessionParamsSchema, request.params);
@@ -233,6 +262,7 @@ export class ExecutionHttpServer {
     if (error instanceof StoreError) {
       const code = error.code;
       if (code === "session_not_found") return new HttpError(404, code, "Session does not exist");
+      if (code === "workspace_not_found") return new HttpError(404, code, "Workspace has no saved sessions");
       if (["command_conflict", "session_busy", "run_not_active", "run_cancelling", "approval_not_pending", "approval_expired", "workspace_blocked"].includes(code)) {
         return new HttpError(409, code, "Command conflicts with saved state");
       }

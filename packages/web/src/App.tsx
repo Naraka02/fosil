@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import type { ApprovalMode, DirectoryListing, Event, SessionSummary } from "@fosil/contracts";
-import { CommandDeliveryError, loadDirectories, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
+import { CommandDeliveryError, configureProviderCredential, deleteSession, deleteWorkspace, loadDirectories, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
 import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun, type PendingApproval } from "./chat-model.js";
-import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, FossilMark, MenuIcon, PanelIcon, PermissionIcon, PlusIcon, SendIcon, SettingsIcon } from "./icons.js";
+import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, FossilMark, KeyIcon, MenuIcon, PanelIcon, PermissionIcon, PlusIcon, SendIcon, SettingsIcon, TrashIcon } from "./icons.js";
 import { groupSessionsByWorkspace, sortSessionsByRecent, workspaceName } from "./session-model.js";
 import { Markdown } from "./Markdown.js";
 import { TraceView } from "./TraceView.js";
@@ -11,6 +11,7 @@ import "./app.css";
 
 type Connection = "loading" | "live" | "reconnecting" | "offline";
 type View = "chat" | "trace";
+type DeleteTarget = { kind: "session"; session: SessionSummary } | { kind: "workspace"; root: string; name: string; count: number };
 const savedSessionKey = "fosil.selected-session";
 const collapsedKey = "fosil.sidebar-collapsed";
 const approvalModeKey = "fosil.approval-mode";
@@ -52,7 +53,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(() => readStorage(savedSessionKey));
   const [events, setEvents] = useState<Event[]>([]);
   const [connection, setConnection] = useState<Connection>("loading");
-  const [service, setService] = useState<ServiceStatus>({ status: "failed", model: "unknown" });
+  const [service, setService] = useState<ServiceStatus>({ status: "failed", model: "unknown", api_key: { configured: false, source: "none" } });
   const [commandError, setCommandError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -71,7 +72,14 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [permissionWarningOpen, setPermissionWarningOpen] = useState(false);
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"general" | "runtime">("runtime");
+  const [settingsSection, setSettingsSection] = useState<"general" | "provider" | "runtime">("runtime");
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [savingApiKey, setSavingApiKey] = useState(false);
+  const [credentialMessage, setCredentialMessage] = useState<{ kind: "success" | "error"; text: string } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStorage(collapsedKey) === "true");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(readApprovalMode);
@@ -201,11 +209,47 @@ export function App() {
       if (request === directoryRequest.current) setDirectoryError("无法读取该本地目录");
     } finally { if (request === directoryRequest.current) setBrowsingDirectories(false); }
   };
+  const editWorkspace = (value: string) => {
+    directoryRequest.current++;
+    setBrowsingDirectories(false);
+    setWorkspace(value);
+  };
   const openWorkspaceDialog = () => {
     setNewSessionOpen(true); setDirectoryListing(null); setDirectoryError(null);
     void browseWorkspace(workspace.trim() || undefined);
   };
   const closeWorkspaceDialog = () => { directoryRequest.current++; setNewSessionOpen(false); setBrowsingDirectories(false); };
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting || uncertain) return;
+    setDeleting(true); setCommandError(null); setDeleteError(null);
+    try {
+      if (deleteTarget.kind === "session") await deleteSession(deleteTarget.session.session_id);
+      else await deleteWorkspace(deleteTarget.root);
+      setDeleteTarget(null);
+      await refreshSessions();
+    } catch (failure) {
+      const deliveryUncertain = !(failure instanceof CommandDeliveryError) || failure.uncertain;
+      const detail = failure instanceof Error ? failure.message : "删除失败";
+      setDeleteError(deliveryUncertain ? `${detail}。结果可能不确定，请刷新核对。` : detail);
+      mutationFailed(failure);
+    }
+    finally { setDeleting(false); }
+  };
+  const requestDelete = (target: DeleteTarget) => { setDeleteError(null); setDeleteTarget(target); };
+  const saveApiKey = async (event: FormEvent) => {
+    event.preventDefault();
+    if (savingApiKey || apiKey.length < 8) return;
+    setSavingApiKey(true); setCredentialMessage(null);
+    try {
+      const status = await configureProviderCredential(apiKey);
+      setService((current) => ({ ...current, api_key: status }));
+      setCredentialMessage({ kind: "success", text: "已保存到当前后端进程内存；新的模型调用将使用此 Key。" });
+    } catch (failure) {
+      setCredentialMessage({ kind: "error", text: failure instanceof Error ? failure.message : "API Key 配置失败" });
+    } finally {
+      setApiKey(""); setShowApiKey(false); setSavingApiKey(false);
+    }
+  };
 
   const navigation = <>
     <div className="brand"><FossilMark className="brand-mark" /><div className="brand-copy"><strong>Fosil Local</strong><small>本地构建</small></div><span className="build-badge">LOCAL</span><button className="icon-button desktop-collapse" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} onClick={toggleSidebar}><PanelIcon /></button></div>
@@ -214,12 +258,12 @@ export function App() {
     <nav className="workspace-list" aria-label="已保存会话">
       {workspaceGroups.map((group) => {
         const expanded = expandedWorkspaces.has(group.root); return <section className="workspace-group" key={group.root}>
-          <button className="workspace-toggle" type="button" aria-expanded={expanded} onClick={() => toggleWorkspace(group.root)} title={group.root}>
+          <div className="workspace-row"><button className="workspace-toggle" type="button" aria-expanded={expanded} onClick={() => toggleWorkspace(group.root)} title={group.root}>
             <ChevronIcon className={expanded ? "open" : ""} /><FolderIcon /><span><strong>{group.name}</strong><small>{group.sessions.length} 个会话 · {timeLabel(group.updatedAt)}</small></span>
-          </button>
-          {expanded && <div className="session-list">{group.sessions.map((session) => <button key={session.session_id} type="button" className={session.session_id === selectedId ? "session active" : "session"} onClick={() => selectSession(session.session_id)} title={`${session.title} · ${session.session_id}`}>
+          </button><button className="row-delete" type="button" aria-label={`删除工作区记录：${group.name}`} title="删除该工作区的全部会话记录" onClick={() => requestDelete({ kind: "workspace", root: group.root, name: group.name, count: group.sessions.length })}><TrashIcon /></button></div>
+          {expanded && <div className="session-list">{group.sessions.map((session) => <div className="session-row" key={session.session_id}><button type="button" className={session.session_id === selectedId ? "session active" : "session"} onClick={() => selectSession(session.session_id)} title={`${session.title} · ${session.session_id}`}>
             <span className="session-dot" aria-hidden="true" /><span><strong>{session.title}</strong><small>{timeLabel(session.updated_at)}</small></span><StatusPill status={session.activity} compact />
-          </button>)}</div>}
+          </button><button className="row-delete" type="button" aria-label={`删除会话：${session.title}`} title="删除会话记录" onClick={() => requestDelete({ kind: "session", session })}><TrashIcon /></button></div>)}</div>}
         </section>;
       })}
       {!sessions.length && <p className="empty-sidebar">还没有会话。选择一个绝对路径，开始保存本地执行历史。</p>}
@@ -281,7 +325,7 @@ export function App() {
     </main>
 
     {newSessionOpen && <Dialog title="选择本地工作区" onClose={closeWorkspaceDialog} className="new-session-dialog"><form onSubmit={createSession}>
-      <div className="dialog-body workspace-picker"><label htmlFor="workspace">工作区路径</label><div className="workspace-path-row"><div className="path-field"><FolderIcon /><input id="workspace" autoFocus value={workspace} onChange={(event) => setWorkspace(event.target.value)} placeholder="/home/me/project" required /></div><button className="secondary" type="button" onClick={() => void browseWorkspace(workspace.trim())} disabled={browsingDirectories || !workspace.trim()}>转到</button></div>
+      <div className="dialog-body workspace-picker"><label htmlFor="workspace">工作区路径</label><div className="workspace-path-row"><div className="path-field"><FolderIcon /><input id="workspace" autoFocus value={workspace} onChange={(event) => editWorkspace(event.target.value)} placeholder="/home/me/project" required /></div><button className="secondary" type="button" onClick={() => void browseWorkspace(workspace.trim())} disabled={browsingDirectories || !workspace.trim()}>转到</button></div>
         <p>选择已有本地目录，或输入绝对 Linux 路径后转到。这里只读取目录名称，不读取文件内容。</p>
         <div className="directory-browser" aria-busy={browsingDirectories}>
           <header><strong>本地目录</strong><span>{directoryListing?.path ?? (browsingDirectories ? "正在读取…" : "未加载")}</span></header>
@@ -299,11 +343,14 @@ export function App() {
     </form></Dialog>}
 
     {settingsOpen && <Dialog title="设置" onClose={() => setSettingsOpen(false)} className="settings-dialog"><div className="settings-layout">
-      <nav aria-label="设置类别"><button className={settingsSection === "general" ? "selected" : ""} onClick={() => setSettingsSection("general")}><SettingsIcon />通用设置</button><button className={settingsSection === "runtime" ? "selected" : ""} onClick={() => setSettingsSection("runtime")}><PanelIcon />运行时状态</button></nav>
-      <div className="settings-content">{settingsSection === "general" ? <section><h3>通用设置</h3><p className="settings-lead">调整仅保存在当前浏览器中的界面偏好。</p><div className="setting-row"><div><strong>收起桌面侧栏</strong><p>仅保留标志与操作图标。</p></div><button className={`switch ${sidebarCollapsed ? "on" : ""}`} type="button" role="switch" aria-checked={sidebarCollapsed} onClick={toggleSidebar}><span /></button></div></section> :
-        <section><h3>运行时状态</h3><p className="settings-lead">这些信息来自当前 Fosil 服务，仅供读取。</p><div className="provider-row"><strong>Fosil Runtime</strong><StatusPill status={service.status} /></div><dl className="runtime-grid"><div><dt>事件连接</dt><dd><span className={`connection connection-${connection}`}><span />{connectionLabel[connection]}</span></dd></div><div><dt>模型</dt><dd>{service.model}</dd></div><div><dt>工作区</dt><dd>{selected?.workspace_root ?? "未选择"}</dd></div><div><dt>会话</dt><dd>{selected ? shortId(selected.session_id) : "未选择"}</dd></div></dl></section>}
+      <nav aria-label="设置类别"><button className={settingsSection === "general" ? "selected" : ""} onClick={() => setSettingsSection("general")}><SettingsIcon />通用设置</button><button className={settingsSection === "provider" ? "selected" : ""} onClick={() => setSettingsSection("provider")}><KeyIcon />模型与 API</button><button className={settingsSection === "runtime" ? "selected" : ""} onClick={() => setSettingsSection("runtime")}><PanelIcon />运行时状态</button></nav>
+      <div className="settings-content">{settingsSection === "general" ? <section><h3>通用设置</h3><p className="settings-lead">调整仅保存在当前浏览器中的界面偏好。</p><div className="setting-row"><div><strong>收起桌面侧栏</strong><p>仅保留标志与操作图标。</p></div><button className={`switch ${sidebarCollapsed ? "on" : ""}`} type="button" role="switch" aria-checked={sidebarCollapsed} onClick={toggleSidebar}><span /></button></div></section> : settingsSection === "provider" ?
+        <section><h3>模型与 API</h3><p className="settings-lead">为当前 Fosil 后端配置 DeepSeek 凭据。已保存的值永不回显。</p><div className="credential-status"><span className={`credential-dot ${service.api_key.configured ? "configured" : ""}`} /><div><strong>{service.api_key.configured ? "API Key 已配置" : "尚未配置 API Key"}</strong><p>{service.api_key.source === "environment" ? "来源：启动环境变量" : service.api_key.source === "webui" ? "来源：本次 WebUI 配置" : "提交任务前请先配置"}</p></div></div><form className="credential-form" onSubmit={saveApiKey}><label htmlFor="api-key">DeepSeek API Key</label><div className="credential-field"><KeyIcon /><input id="api-key" type={showApiKey ? "text" : "password"} value={apiKey} onChange={(event) => { setApiKey(event.target.value); setCredentialMessage(null); }} autoComplete="new-password" spellCheck={false} placeholder={service.api_key.configured ? "输入新 Key 以替换当前配置" : "输入 API Key"} /><button type="button" className="credential-reveal" onClick={() => setShowApiKey((current) => !current)} disabled={!apiKey}>{showApiKey ? "隐藏" : "显示"}</button></div><p className="credential-note">WebUI 提交的 Key 只驻留在后端进程内存中；不会写入浏览器存储、SQLite、会话事件或 Trace，重启后需要重新配置。</p>{credentialMessage && <p className={`credential-message ${credentialMessage.kind}`} role="status">{credentialMessage.text}</p>}<button className="credential-save" type="submit" disabled={savingApiKey || apiKey.length < 8}>{savingApiKey ? "正在保存" : service.api_key.configured ? "替换 API Key" : "保存 API Key"}</button></form></section> :
+        <section><h3>运行时状态</h3><p className="settings-lead">这些信息来自当前 Fosil 服务，仅供读取。</p><div className="provider-row"><strong>Fosil Runtime</strong><StatusPill status={service.status} /></div><dl className="runtime-grid"><div><dt>事件连接</dt><dd><span className={`connection connection-${connection}`}><span />{connectionLabel[connection]}</span></dd></div><div><dt>模型</dt><dd>{service.model}</dd></div><div><dt>API Key</dt><dd>{service.api_key.configured ? "已配置" : "未配置"}</dd></div><div><dt>工作区</dt><dd>{selected?.workspace_root ?? "未选择"}</dd></div><div><dt>会话</dt><dd>{selected ? shortId(selected.session_id) : "未选择"}</dd></div></dl></section>}
       </div>
     </div></Dialog>}
+
+    {deleteTarget && <Dialog title={deleteTarget.kind === "session" ? "删除会话记录" : "删除工作区记录"} onClose={() => { if (!deleting) setDeleteTarget(null); }} className="delete-dialog"><div className="dialog-body delete-confirm"><span className="delete-mark"><TrashIcon /></span><div><p className="eyebrow">不可撤销</p><h3>{deleteTarget.kind === "session" ? deleteTarget.session.title : deleteTarget.name}</h3><p>{deleteTarget.kind === "session" ? "将删除这个会话的全部消息、Trace、工具结果和命令回执。" : `将删除该工作区下的 ${deleteTarget.count} 个会话及其全部历史记录。`}</p><strong>本地工作区目录和源文件不会被删除。</strong>{deleteError && <p className="delete-error" role="alert">{deleteError}</p>}</div></div><footer className="dialog-actions delete-actions"><button className="secondary" type="button" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button><button className="danger-button" type="button" onClick={() => void confirmDelete()} disabled={deleting || uncertain}>{deleting ? "正在删除" : deleteTarget.kind === "session" ? "删除会话" : "删除工作区记录"}</button></footer></Dialog>}
 
     {permissionWarningOpen && <Dialog title="启用 Full Access" onClose={() => setPermissionWarningOpen(false)} className="permission-dialog"><div className="dialog-body permission-warning"><div className="permission-warning-intro"><span className="permission-warning-mark">!</span><div><p className="eyebrow">高风险权限模式</p><h3>所有工具将不再逐次询问</h3><p>Full Access 会自动允许受支持工具，包括 Shell。它不是工作区沙箱。</p></div></div><ul><li><span />Shell 可读取或修改工作区外的文件</li><li><span />命令可启动进程并产生主机级影响</li><li><span />该选择会写入下一次运行记录</li></ul></div><footer className="dialog-actions permission-warning-actions"><small>仅影响之后提交的运行</small><button className="secondary" type="button" onClick={() => setPermissionWarningOpen(false)}>取消</button><button className="danger-button" type="button" onClick={() => { saveApprovalMode("full_access"); setPermissionWarningOpen(false); }}>启用 Full Access</button></footer></Dialog>}
   </div>;

@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { commandAckSchema, contentMetadataSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type ContentMetadata, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
+import { commandAckSchema, contentMetadataSchema, deletionResultSchema, historyPageRequestSchema, historyPageSchema, sessionListRequestSchema, sessionListSchema, parseCommand, parseEvent, parseEventInput, type CommandAck, type ContentMetadata, type DeletionResult, type Event, type EventInput, type HistoryPage, type SessionList } from "@fosil/contracts";
 import { applyEvent, planRecovery, replay, workspaceBlockers, type ExecutionState } from "@fosil/core";
 import { deriveSessionTitle } from "./session-title.js";
 import { StoreError, type RecoveryReport, type SessionSummary } from "./storage-protocol.js";
@@ -151,6 +151,24 @@ export class StorageDatabase {
     })();
   }
 
+  deleteSession(sessionId: string): DeletionResult {
+    return this.db.transaction(() => {
+      if (!this.db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(sessionId)) {
+        throw new StoreError("session_not_found", "Session does not exist");
+      }
+      return this.deleteSessions([sessionId]);
+    }).immediate();
+  }
+
+  deleteWorkspace(workspaceRoot: string): DeletionResult {
+    return this.db.transaction(() => {
+      const sessionIds = (this.db.prepare("SELECT session_id FROM sessions WHERE workspace_root = ? ORDER BY session_id")
+        .all(workspaceRoot) as Array<{ session_id: string }>).map((row) => row.session_id);
+      if (sessionIds.length === 0) throw new StoreError("workspace_not_found", "Workspace has no saved sessions");
+      return this.deleteSessions(sessionIds);
+    }).immediate();
+  }
+
   readPage(raw: unknown): HistoryPage {
     const request = historyPageRequestSchema.parse(raw);
     return this.db.transaction(() => {
@@ -284,6 +302,41 @@ export class StorageDatabase {
         throw new StoreError("workspace_blocked", "Workspace has an unknown tool outcome or cleanup failure; verified resolution is required");
       }
     }
+  }
+
+  private deleteSessions(sessionIds: readonly string[]): DeletionResult {
+    const targets = new Set(sessionIds);
+    for (const sessionId of sessionIds) {
+      const state = this.load(sessionId).state;
+      if (state.activeRunId !== null || state.activity !== "idle") {
+        throw new StoreError("session_busy", "Active sessions cannot be deleted");
+      }
+      if (workspaceBlockers(state).length > 0) {
+        throw new StoreError("workspace_blocked", "Sessions with unresolved workspace outcomes cannot be deleted");
+      }
+    }
+
+    const storeReceipts = this.db.prepare("SELECT command_id, ack_json FROM command_receipts WHERE scope_kind = 'store' AND scope_id = ''")
+      .all() as Array<{ command_id: string; ack_json: string }>;
+    for (const receipt of storeReceipts) {
+      let ack: CommandAck;
+      try { ack = commandAckSchema.parse(JSON.parse(receipt.ack_json)); }
+      catch (error) { throw new StoreError("corrupt_history", error instanceof Error ? error.message : "Invalid command receipt"); }
+      if (targets.has(ack.session_id)) {
+        this.db.prepare("DELETE FROM command_receipts WHERE scope_kind = 'store' AND scope_id = '' AND command_id = ?")
+          .run(receipt.command_id);
+      }
+    }
+
+    for (const sessionId of sessionIds) {
+      const payloadRows = this.db.prepare("SELECT payload_id FROM events WHERE session_id = ?").all(sessionId) as Array<{ payload_id: string }>;
+      const payloadIds = payloadRows.map((row) => row.payload_id);
+      this.db.prepare("DELETE FROM command_receipts WHERE scope_kind = 'session' AND scope_id = ?").run(sessionId);
+      this.db.prepare("DELETE FROM events WHERE session_id = ?").run(sessionId);
+      for (const payloadId of payloadIds) this.db.prepare("DELETE FROM payloads WHERE payload_id = ?").run(payloadId);
+      this.db.prepare("DELETE FROM sessions WHERE session_id = ?").run(sessionId);
+    }
+    return deletionResultSchema.parse({ deleted_session_ids: [...sessionIds] });
   }
 
   private load(sessionId: string): { events: Event[]; state: ExecutionState } {

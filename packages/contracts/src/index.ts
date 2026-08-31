@@ -362,6 +362,13 @@ export type SessionSummary = z.infer<typeof sessionSummarySchema>;
 export type SessionListRequest = z.input<typeof sessionListRequestSchema>;
 export type SessionList = z.infer<typeof sessionListSchema>;
 
+/** Destructive history operations delete Fosil records only; local workspace files are never targets. */
+export const emptyMutationSchema = z.object({}).strict();
+export const workspaceDeleteRequestSchema = z.object({ workspace_root: absolutePath }).strict();
+export const deletionResultSchema = z.object({ deleted_session_ids: z.array(id).min(1) }).strict();
+export type WorkspaceDeleteRequest = z.infer<typeof workspaceDeleteRequestSchema>;
+export type DeletionResult = z.infer<typeof deletionResultSchema>;
+
 /** Read-only local directory discovery for the same-origin workspace picker. */
 export const directoryListingQuerySchema = z.object({ path: absolutePath.optional() }).strict();
 export const directoryEntrySchema = z.object({ name: id, path: absolutePath }).strict();
@@ -381,6 +388,16 @@ export const sessionListQuerySchema = z.object({ after: id.optional(), limit: pa
 export const historyQuerySchema = z.object({ cursor: z.string().optional(), limit: pageLimitText.optional() }).strict();
 export const streamQuerySchema = z.object({ after: z.string().optional() }).strict();
 export const sessionParamsSchema = z.object({ sessionId: id }).strict();
-export const serviceStatusSchema = z.object({ status: z.enum(["ready", "failed", "stopping"]), model: id }).strict();
+export const providerCredentialStatusSchema = z.object({
+  configured: z.boolean(), source: z.enum(["environment", "webui", "none"])
+}).strict().refine((value) => value.configured === (value.source !== "none"), "credential status is inconsistent");
+export const providerCredentialRequestSchema = z.object({
+  api_key: z.string().min(8).max(16 * 1024).refine((value) => value !== "[MASKED]", "reserved masking marker")
+}).strict();
+export const serviceStatusSchema = z.object({
+  status: z.enum(["ready", "failed", "stopping"]), model: id, api_key: providerCredentialStatusSchema
+}).strict();
+export type ProviderCredentialStatus = z.infer<typeof providerCredentialStatusSchema>;
+export type ProviderCredentialRequest = z.infer<typeof providerCredentialRequestSchema>;
 export type ServiceStatus = z.infer<typeof serviceStatusSchema>;
 export const apiErrorSchema = z.object({ error: z.object({ code: id, message: z.string() }).strict() }).strict();
