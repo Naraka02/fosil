@@ -9,11 +9,10 @@ import { runAcceptanceGit } from "./acceptance-git.js";
 import type { AcceptanceCase, FoundationReport } from "./foundation-acceptance.js";
 import { renderFoundationReport } from "./foundation-report.js";
 import { releaseFailingSource as failingSource, releaseRepairedSource as repairedSource, releaseTestCommand as testCommand, validateReleaseApproval } from "./release-policy.js";
-import { SqliteWorkerStore } from "./store.js";
+import { SqliteWorkerStore } from "@fosil/server";
 
 const repository = fileURLToPath(new URL("../../../", import.meta.url));
-const productCli = fileURLToPath(new URL("./product-cli.js", import.meta.url));
-const workerUrl = new URL("./storage-worker.js", import.meta.url);
+const productCli = join(repository, "packages/server/dist/product/product-cli.js");
 const apiKey = process.env.DEEPSEEK_API_KEY ?? "";
 const model = "deepseek-v4-flash";
 const pause = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -168,7 +167,8 @@ async function driveApprovals(
 }
 
 async function canonicalHistory(database: string, sessionId: string): Promise<Event[]> {
-  const store = new SqliteWorkerStore(workerUrl, { maskSecrets: [apiKey] });
+  const store = new SqliteWorkerStore();
+  store.addMaskSecret(apiKey);
   try { await store.open(database); return await store.read(sessionId); }
   finally { await store.close(); }
 }

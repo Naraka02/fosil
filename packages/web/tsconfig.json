@@ -8,5 +8,6 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"]
   },
   "references": [{ "path": "../contracts" }],
-  "include": ["src/**/*.tsx", "src/**/*.ts"]
+  "include": ["src/**/*.tsx", "src/**/*.ts"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

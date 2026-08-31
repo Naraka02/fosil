@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { runLoopAcceptance } from "./loop-acceptance.js";
 import { renderFoundationReport } from "./foundation-report.js";
-import { SqliteWorkerStore } from "./store.js";
+import { SqliteWorkerStore } from "@fosil/server";
 import { runAcceptanceGit } from "./acceptance-git.js";
 
 it("keeps fixture Git operations and source lookup in their intended checkout despite ambient routing and config", async () => {

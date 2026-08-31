@@ -4,8 +4,8 @@ import {
   type Event, type EventInput, type EventReason, type ModelOutput, type ModelRequestContext
 } from "@fosil/contracts";
 import { buildModelRequest, replay, type ExecutionState, type RunState } from "@fosil/core";
-import { executeModelRequest, type ModelProvider, type ModelRequestOutcome } from "./model-provider.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
+import { executeModelRequest, type ModelProvider, type ModelRequestOutcome } from "../providers/model-provider.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 import { ToolService } from "./tool-service.js";
 import {
   buildCompactionPlan, compactionTrigger, measureContext, projectedRequestAfterCompaction,

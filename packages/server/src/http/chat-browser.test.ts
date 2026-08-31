@@ -7,11 +7,11 @@ import { chromium, type Browser } from "playwright";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ModelRequestContext } from "@fosil/contracts";
 import { ExecutionHttpServer } from "./execution-http.js";
-import type { ModelProvider } from "./model-provider.js";
-import { SqliteWorkerStore } from "./store.js";
+import type { ModelProvider } from "../providers/model-provider.js";
+import { SqliteWorkerStore } from "../storage/store.js";
 
-const workerUrl = new URL("../dist/storage-worker.js", import.meta.url);
-const webRoot = fileURLToPath(new URL("../../web/dist/", import.meta.url));
+const workerUrl = new URL("../../dist/storage/storage-worker.js", import.meta.url);
+const webRoot = fileURLToPath(new URL("../../../web/dist/", import.meta.url));
 const usage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
 const finish = (text: string, tool_calls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = []) => ({
   type: "finish", output: { text, reasoning: null, tool_calls }, usage, stop_reason: tool_calls.length ? "tool_calls" : "stop"

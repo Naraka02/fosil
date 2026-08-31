@@ -1,5 +1,6 @@
 import { parseEventInput, type EventInput } from "@fosil/contracts";
-import { applyEvent, type ExecutionState } from "./index.js";
+import { applyEvent } from "./reducer.js";
+import type { ExecutionState } from "./state.js";
 
 export interface WorkspaceBlocker {
   run_id: string;

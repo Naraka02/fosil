@@ -8,13 +8,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { commandAckSchema, directoryListingSchema, historyPageSchema, sessionListSchema, type Command, type CommandAck, type Event, type EventInput, type HistoryPage, type HistoryPageRequest } from "@fosil/contracts";
 import { replay } from "@fosil/core";
 import { ExecutionHttpServer, type ExecutionHttpOptions } from "./execution-http.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
-import type { ModelProvider } from "./model-provider.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
+import type { ModelProvider } from "../providers/model-provider.js";
 import { StreamStopped, writeSseFrame } from "./sse.js";
 
 const directories: string[] = [], stores: SqliteWorkerStore[] = [], servers: ExecutionHttpServer[] = [];
 const connections: Array<{ destroy(): unknown }> = [];
-const workerUrl = new URL("../dist/storage-worker.js", import.meta.url);
+const workerUrl = new URL("../../dist/storage/storage-worker.js", import.meta.url);
 const usage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
 const finish = (text = "Done", tool_calls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = []) => ({
   type: "finish", output: { text, reasoning: null, tool_calls }, usage, stop_reason: tool_calls.length ? "tool_calls" : "stop"

@@ -8,7 +8,11 @@
     "declarationMap": true,
     "sourceMap": true
   },
-  "references": [{ "path": "../contracts" }],
+  "references": [
+    { "path": "../contracts" },
+    { "path": "../core" },
+    { "path": "../server" }
+  ],
   "include": ["src/**/*.ts"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

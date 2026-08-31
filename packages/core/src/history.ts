@@ -1,5 +1,5 @@
 import type { ContextFact, EventReason, ExecutionError, JsonValue, ModelOutput, RequestStatus, ToolStatus } from "@fosil/contracts";
-import { EventReducerError, type ExecutionState } from "./index.js";
+import { EventReducerError, type ExecutionState } from "./state.js";
 
 type Correlation = { run_id: string; request_id: string };
 export type ModelHistoryMessage =

@@ -4,7 +4,7 @@ import {
   payloadFlags, projectTrace, traceTimelineItemHasError,
   type ApprovalTraceRecord, type ModelTraceRecord, type ToolTraceRecord, type TraceRecord, type TraceTimelineItem, type UserTraceItem
 } from "./trace-model.js";
-import { StatusPill } from "./ui.js";
+import { StatusPill } from "../../shared/ui.js";
 
 const text = (value: unknown) => JSON.stringify(value, null, 2);
 const metric = (value: number | null, unit = "") => value === null ? "未知" : `${value}${unit}`;

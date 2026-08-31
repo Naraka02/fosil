@@ -2,7 +2,7 @@ import type {
   ApprovalMode, ApprovalStatus, Event, ExecutionError, Evidence, JsonValue, ModelOutput, ModelRequestContext,
   RequestStatus, RunStatus, StepStatus, Timing, ToolStatus, Usage
 } from "@fosil/contracts";
-import { EventSequenceError } from "./chat-model.js";
+import { EventSequenceError } from "../chat/chat-model.js";
 
 type Delta = Extract<Event, { type: "model.response.delta" }>["data"]["delta"];
 

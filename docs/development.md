@@ -30,6 +30,48 @@ On WSL, ensure `TMPDIR` names an existing, writable Linux directory. If the shel
 
 Storage ownership and shell-runner tests create local child processes and terminate their own fixture processes. Shell checks require Linux with readable procfs and exercise stopped bootstraps, process-group signalling, and bounded cleanup. If the execution sandbox prevents observing child-process output, rerun the affected tests with the required permission; a timeout or missing result is not a passed ownership check.
 
+### Command reference
+
+The commands in this section are the supported repository entry points, not a catalog of every npm or Node.js built-in command. Run them from the repository root with Node.js 24 unless a command says otherwise. The [root manifest](../package.json) remains the executable source of truth when this reference and the scripts disagree.
+
+#### Installation and root npm commands
+
+| Command | Purpose and prerequisites |
+| --- | --- |
+| `npm ci` | Install exactly the dependency graph in `package-lock.json`; use this for a clean checkout or reproducible verification. |
+| `npx playwright install chromium` | Install the Chromium binary matching the locked Playwright package; required by real-browser tests and release acceptance. |
+| `npm run typecheck` | Build the TypeScript project-reference graph and then type-check adjacent test files without emitting test JavaScript. |
+| `npm run build` | Build all TypeScript workspaces, verify production package boundaries and public exports, and bundle the Web application. |
+| `npm test` | Run `npm run build` through the `pretest` hook, then execute the complete Vitest suite, including real-browser tests. |
+| `npm test -- PATH...` | Run the same pretest build and then only the Vitest files or patterns supplied after `--`; use repository-relative test paths. |
+| `npm run test:watch -- PATH...` | Run type checking through `pretest:watch`, then start Vitest in watch mode, optionally scoped by paths or patterns. |
+| `npm run sqlite:probe` | Run the compiled native SQLite round-trip probe; run `npm run build` first when outputs may be absent or stale. |
+| `npm start -- [options]` | Run `npm run build` through `prestart`, then start the product launcher; the [product launcher reference](deepseek-provider.md#product-launcher) owns its options, credential behavior, and defaults. |
+| `npm start -- --help` | Build and print product launcher help without opening storage, listening, or contacting the provider. |
+| `npm run acceptance:foundation` | Compile prerequisites and generate a local controlled Foundation report under `artifacts/execution-foundation/`; see the [Foundation acceptance procedure](execution-foundation-acceptance.md). |
+| `npm run acceptance:serve` | Compile prerequisites and serve the latest Foundation report read-only on `127.0.0.1:8787`; a generated report must already exist. |
+| `npm run acceptance:loop` | Compile prerequisites and generate controlled-provider Agent Loop evidence without a network model call; see the [Agent Loop acceptance procedure](agent-loop-acceptance.md). |
+| `npm run acceptance:release -- --live` | Build and run the explicitly gated live DeepSeek browser acceptance; this requires `DEEPSEEK_API_KEY`, makes billable requests, and follows the [release acceptance procedure](release-acceptance.md). |
+
+The package workspaces expose `build` and `typecheck` scripts for focused maintenance. Use `npm run build --workspace @fosil/contracts`, `@fosil/core`, `@fosil/server`, `@fosil/web`, or `@fosil/acceptance` to run one package script; replace `build` with `typecheck` for its package-level TypeScript check. These focused commands do not replace the root structural verifier, Web production bundle, test-file type check, or complete regression suite.
+
+#### Direct Node.js entry points
+
+Direct Node.js commands bypass npm lifecycle hooks. Run `npm run build` first unless the command is the source-level structural verifier, and use the npm command above when automatic prerequisite compilation is desired.
+
+| Command | Equivalent scope and boundary |
+| --- | --- |
+| `node packages/server/dist/product/product-cli.js [options]` | Start the compiled product without the `prestart` build; it accepts the same options as `npm start -- [options]`. |
+| `node packages/server/dist/storage/sqlite-probe.js` | Run the compiled SQLite probe without checking or rebuilding its inputs. |
+| `node packages/acceptance/dist/foundation-cli.js` | Generate Foundation evidence from the current compiled runtime without the npm pre-hook. |
+| `node packages/acceptance/dist/foundation-viewer-cli.js` | Serve the latest generated Foundation report on the fixed read-only loopback viewer. |
+| `node packages/acceptance/dist/loop-cli.js` | Generate controlled Agent Loop evidence from the current compiled runtime without the npm pre-hook. |
+| `node packages/acceptance/dist/release-cli.js --live` | Run live release acceptance from existing build outputs; it still requires the exact gate, credential, Chromium, and billable-network authorization described by the release procedure. |
+| `node --env-file=.env packages/acceptance/dist/release-cli.js --live` | Supply the live acceptance environment from an ignored local file without placing the provider key in an argument; never track the `.env` file. |
+| `node scripts/verify-structure.mjs` | Check current manifests, source imports, compiled outputs, and public package imports without compiling first; stale or missing outputs make the result unsuitable as build evidence. |
+
+The Foundation and Agent Loop generators create ignored local artifacts and predefined fixture effects. The viewer is read-only. The product launcher remains active until SIGINT or SIGTERM, and the live release driver may already have made a provider request or local fixture effect when it reports failure; do not retry it automatically.
+
 ## Working sequence
 
 1. Establish the requested outcome, exclusions, and observable acceptance conditions. Ask the maintainer about unresolved choices that would materially change scope; do not silently turn an open question into a product decision.

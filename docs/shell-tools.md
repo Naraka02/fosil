@@ -14,7 +14,7 @@ Execution requires Linux and readable procfs on a trusted local machine. The wor
 
 ## Process ownership and deadlines
 
-The [executor](../packages/server/src/shell-tools.ts) creates a detached process group and session. A bootstrap shell stops itself before running user code, allowing the runner to capture its PID, group, session, and procfs start-time identity. The runner rereads durable permission/cancellation state and rechecks identity before allowing that bootstrap to continue. Failure or cancellation while it is stopped kills the bootstrap without resuming into the user command.
+The [executor](../packages/server/src/tools/shell-tools.ts) creates a detached process group and session. A bootstrap shell stops itself before running user code, allowing the runner to capture its PID, group, session, and procfs start-time identity. The runner rereads durable permission/cancellation state and rechecks identity before allowing that bootstrap to continue. Failure or cancellation while it is stopped kills the bootstrap without resuming into the user command.
 
 The deadline begins after spawn and includes bootstrap waiting, not the approval wait or initial pre-spawn state check. While the command runs, the runner polls the durable state guard at approximately 100 ms intervals, with at most one guard request pending. A separate loop continues checking the deadline even if a guard promise stalls. Scheduling and procfs I/O mean these are operational deadlines, not hard real-time guarantees.
 
@@ -42,6 +42,6 @@ This evidence does not attribute workspace changes to the command or generate a 
 
 ## Verification and limits
 
-The [executor tests](../packages/server/src/shell-tools.test.ts) use controlled local processes to check output/exit/signal handling, environment filtering, byte and UTF-8 boundaries, stopped-bootstrap cancellation, stalled monitors, TERM resistance, background children with open or closed stdio, monitor errors, and cleanup uncertainty. The [service tests](../packages/server/src/file-tools.test.ts) check durable gating, invalid commands, mixed file/shell ordering, live cancellation, timeout, persistence failures, and no repeat effect across reopen.
+The [executor tests](../packages/server/src/tools/shell-tools.test.ts) use controlled local processes to check output/exit/signal handling, environment filtering, byte and UTF-8 boundaries, stopped-bootstrap cancellation, stalled monitors, TERM resistance, background children with open or closed stdio, monitor errors, and cleanup uncertainty. The [service tests](../packages/server/src/tools/file-tools.test.ts) check durable gating, invalid commands, mixed file/shell ordering, live cancellation, timeout, persistence failures, and no repeat effect across reopen.
 
 These checks do not establish a complete provider-driven read/edit/test workflow, browser controls, secret masking, shell file-change attribution, adversarial process containment, post-crash cleanup, or blocker resolution. The [development guide](development.md#setup-and-verification-procedure) owns commands and the sandbox permission needed for child-process output tests.

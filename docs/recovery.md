@@ -25,7 +25,7 @@ A complete model response can be committed before every returned tool call has a
 
 `SqliteWorkerStore.open(path)` acquires exclusive ownership and validates the store layout, then replays every session found in either the session index or the event ledger. It plans and appends all required recovery closures in one transaction, including payloads and session-index updates. Only after that transaction commits does open return a `RecoveryReport` and allow subsequent queued operations to run. A rejected open leaves no database admitted to the worker.
 
-The report lists recovered sessions with their run identities and committed sequence ranges, plus workspace blockers derived from the resulting history. It is a startup summary, not another durable record stream or a continuously updated status feed. The [server protocol types](../packages/server/src/storage-protocol.ts) own its shape. Inspect the canonical events for detailed evidence.
+The report lists recovered sessions with their run identities and committed sequence ranges, plus workspace blockers derived from the resulting history. It is a startup summary, not another durable record stream or a continuously updated status feed. The [server protocol types](../packages/server/src/storage/storage-protocol.ts) own its shape. Inspect the canonical events for detailed evidence.
 
 Any invalid stored event, lifecycle/index mismatch, or failed closure write aborts the entire recovery transaction. A failure in a later session cannot leave earlier sessions partially recovered. Previously committed records and command receipts remain intact. Reopening after a successful recovery adds no duplicate terminal facts, and retrying an old accepted command returns its original receipt without restarting its interrupted run.
 
@@ -55,7 +55,7 @@ The [agent loop](agent-loop.md#request-assembly-and-provider-boundary) assembles
 
 ## Verification and limits
 
-The existing [reducer tests](../packages/core/src/reducer.test.ts) exercise recovery of every prefix of a complete lifecycle, deterministic and immutable planning, repeated recovery, partial output, preserved decisions, multiple declared calls, cancellation intent, and correlated model-history results. The [storage tests](../packages/server/src/store.test.ts) cover fixed-prefix paging, startup command ordering, atomic multi-session recovery rollback, corruption rejection, and workspace blockers across reopen and overlapping roots.
+The existing [reducer tests](../packages/core/src/reducer.test.ts) exercise recovery of every prefix of a complete lifecycle, deterministic and immutable planning, repeated recovery, partial output, preserved decisions, multiple declared calls, cancellation intent, and correlated model-history results. The [storage tests](../packages/server/src/storage/store.test.ts) cover fixed-prefix paging, startup command ordering, atomic multi-session recovery rollback, corruption rejection, and workspace blockers across reopen and overlapping roots.
 
 Process tests stop an owned fixture before tool dispatch, after a recorded dispatch and controlled file effect, and after result commit. Reopening never repeats the fixture effect; only the uncertain dispatched outcome blocks a new run. These fixtures do not implement a real shell runner or provider, validate surviving process-group cleanup, or test a kill during SQLite commit. Power-loss and disk-fault durability remain unverified.
 

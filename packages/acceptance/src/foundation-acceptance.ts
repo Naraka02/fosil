@@ -4,8 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { parseEventInput, toolDefinitions, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
 import { buildModelHistory, replay, workspaceBlockers } from "@fosil/core";
-import { SqliteWorkerStore, StoreError } from "./store.js";
-import { ToolService, type ToolAdvance } from "./tool-service.js";
+import { SqliteWorkerStore, StoreError, ToolService, type ToolAdvance } from "@fosil/server";
 
 type Finished = Extract<Event, { type: "tool.finished" }>;
 export interface AcceptanceCase {
@@ -86,8 +85,7 @@ export async function runFoundationAcceptance(directory: string, source: Record<
     ], cases: []
   };
   const database = join(directory, "events.db");
-  const workerUrl = new URL("../dist/storage-worker.js", import.meta.url);
-  let store = new AcceptanceStore(workerUrl);
+  let store = new AcceptanceStore();
   let service = new ToolService(store);
   try {
     await store.open(database);
@@ -204,7 +202,7 @@ export async function runFoundationAcceptance(directory: string, source: Record<
       await c.check("Pre-existing user changes are preserved and kept separate from the managed-edit diff", async () => assert.equal(await readFile(join(c.root, "user-notes.txt"), "utf8"), userChange));
       await c.finish();
       const saved = await store.read(c.sessionId);
-      await store.close(); store = new AcceptanceStore(workerUrl);
+      await store.close(); store = new AcceptanceStore();
       const recovery = await store.open(database); service = new ToolService(store);
       await c.check("Reopening and re-reading a settled call preserves exact events and executes no second effect", async () => {
         assert.deepEqual(recovery.recovered_sessions, []); assert.deepEqual(await store.read(c.sessionId), saved);
@@ -287,7 +285,7 @@ export async function runFoundationAcceptance(directory: string, source: Record<
         assert.equal(await readFile(join(c.root, "effect-count.txt"), "utf8"), "x");
         assert.equal(replay(await store.read(c.sessionId)).runs.get(c.runId)!.tools.get(call)!.status, "running");
       });
-      await store.close(); store = new AcceptanceStore(workerUrl);
+      await store.close(); store = new AcceptanceStore();
       const recovery = await store.open(database); service = new ToolService(store);
       c.result.observations.recovery = recovery;
       await c.check("Restart records unknown interruption and refuses new workspace execution", async () => {

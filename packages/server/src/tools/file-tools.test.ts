@@ -5,10 +5,10 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fileToolDefinitions, toolDefinitions, parseEventInput, parseFileToolInvocation, type ApprovalMode, type Event, type EventInput, type JsonValue } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
-import { FileToolService, type FileToolServiceOptions, type ToolAdvance } from "./file-tool-service.js";
-import { ToolService } from "./tool-service.js";
+import { FileToolService, type FileToolServiceOptions, type ToolAdvance } from "../execution/file-tool-service.js";
+import { ToolService } from "../execution/tool-service.js";
 import { executeFileTool, ToolCancelled } from "./file-tools.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
 vi.mock("node:fs/promises", async (original) => ({ ...await original<typeof import("node:fs/promises")>() }));
 import * as fs from "node:fs/promises";
@@ -40,7 +40,7 @@ async function directory() {
 }
 async function fixture(name = "edit_file", args: JsonValue = { path: "target.txt", expected_sha256: hash("before\n"), replacement: "after\n" }, options: FileToolServiceOptions & { approvalMode?: ApprovalMode } = {}, extra: { name: string; arguments: JsonValue; provider_call_id: string }[] = [], Service: typeof ToolService = FileToolService, shared?: { store: HookStore; database: string; service: ToolService }) {
   const root = await directory();
-  const store = shared?.store ?? new HookStore(new URL("../dist/storage-worker.js", import.meta.url));
+  const store = shared?.store ?? new HookStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
   const database = shared?.database ?? join(root, "events.db");
   if (!shared) { stores.push(store); await store.open(database); }
   await writeFile(join(root, "target.txt"), "before\n");
@@ -339,7 +339,7 @@ describe("file tool service", () => {
     await writeFile(join(f.root, "target.txt"), "later user edit");
     expect(await f.advance()).toEqual({ status: "in_progress", callId: f.callId });
     await f.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
     stores.push(reopened);
     await reopened.open(f.database);
     const state = replay(await reopened.read(f.sessionId));
@@ -562,7 +562,7 @@ describe("shared-service cross-workspace concurrency", () => {
       expect(bDone.data.status).toBe("succeeded");
     } finally { await Promise.allSettled([releaseFixture(a), releaseFixture(b)]); await settled; a.store.beforeAppend = undefined; }
     await a.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url)); stores.push(reopened);
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url)); stores.push(reopened);
     const recovery = await reopened.open(a.database);
     expect(recovery.blocked_workspaces.map((blocker) => blocker.workspace_root)).toEqual([a.root]);
     const resumed = new ToolService(reopened);
@@ -703,7 +703,7 @@ describe("shell service integration", () => {
     await expect(f.advance()).rejects.toMatchObject({ code: "fixture_storage_failure" });
     expect(await f.advance()).toEqual({ status: "in_progress", callId: f.callId });
     await f.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
     stores.push(reopened);
     await reopened.open(f.database);
     const result = finished(await new ToolService(reopened).advance(f.sessionId, f.runId, f.callId));

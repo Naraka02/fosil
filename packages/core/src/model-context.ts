@@ -1,7 +1,7 @@
 import { modelRequestContextSchema, toolDefinitions, type ModelRequestContext } from "@fosil/contracts";
 import { buildModelHistory } from "./history.js";
 import type { ModelHistoryMessage } from "./history.js";
-import type { ExecutionState } from "./index.js";
+import type { ExecutionState } from "./state.js";
 
 export interface ModelRequestOptions {
   provider: string;

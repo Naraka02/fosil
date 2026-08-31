@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "packages/acceptance" },
     { "path": "packages/contracts" },
     { "path": "packages/core" },
     { "path": "packages/server" },

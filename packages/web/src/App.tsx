@@ -1,22 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
-import type { ApprovalMode, DirectoryListing, Event, SessionSummary } from "@fosil/contracts";
-import { CommandDeliveryError, configureProviderCredential, deleteSession, deleteWorkspace, loadDirectories, loadHistory, loadServiceStatus, loadSessions, parseStreamEvent, sendCommand, type ServiceStatus } from "./api.js";
-import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun, type PendingApproval } from "./chat-model.js";
-import { CheckIcon, ChevronIcon, CloseIcon, FolderIcon, FossilMark, KeyIcon, MenuIcon, PanelIcon, PermissionIcon, PlusIcon, SendIcon, SettingsIcon, TrashIcon } from "./icons.js";
-import { groupSessionsByWorkspace, sortSessionsByRecent, workspaceName } from "./session-model.js";
-import { Markdown } from "./Markdown.js";
-import { TraceView } from "./TraceView.js";
-import { StatusPill } from "./ui.js";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import type { ApprovalMode, DirectoryListing, SessionSummary } from "@fosil/contracts";
+import { CommandDeliveryError, configureProviderCredential, deleteSession, deleteWorkspace, loadDirectories, loadServiceStatus, sendCommand, type ServiceStatus } from "./api.js";
+import { projectChat, summarizeChatRun, type PendingApproval } from "./features/chat/chat-model.js";
+import { groupSessionsByWorkspace, workspaceName } from "./features/sessions/session-model.js";
+import { Markdown } from "./features/chat/Markdown.js";
+import { TraceView } from "./features/trace/TraceView.js";
+import { CheckIcon, ChevronIcon, FolderIcon, FossilMark, KeyIcon, MenuIcon, PanelIcon, PermissionIcon, SendIcon, SettingsIcon, TrashIcon } from "./shared/icons.js";
+import { Dialog } from "./shared/Dialog.js";
+import { StatusPill } from "./shared/ui.js";
+import { useSessionStream, type Connection } from "./features/sessions/useSessionStream.js";
+import { useSessionCatalog } from "./features/sessions/useSessionCatalog.js";
+import { Navigation } from "./features/sessions/Navigation.js";
+import { readStorage, writeStorage } from "./shared/browser-storage.js";
 import "./app.css";
 
-type Connection = "loading" | "live" | "reconnecting" | "offline";
 type View = "chat" | "trace";
 type DeleteTarget = { kind: "session"; session: SessionSummary } | { kind: "workspace"; root: string; name: string; count: number };
-const savedSessionKey = "fosil.selected-session";
 const collapsedKey = "fosil.sidebar-collapsed";
 const approvalModeKey = "fosil.approval-mode";
-const readStorage = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
-const writeStorage = (key: string, value: string | null) => { try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); } catch {} };
 const readApprovalMode = (): ApprovalMode => {
   const value = readStorage(approvalModeKey);
   return value === "workspace_write" || value === "full_access" ? value : "manual";
@@ -32,31 +33,17 @@ const shortId = (value: string) => value.length > 10 ? value.slice(0, 8) : value
 const commandId = () => crypto.randomUUID();
 const json = (value: unknown) => JSON.stringify(value, null, 2);
 const connectionLabel: Record<Connection, string> = { loading: "连接中", live: "已连接", reconnecting: "重连中", offline: "离线" };
-const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 const numberLabel = new Intl.NumberFormat("zh-CN");
 const durationLabel = (value: number | null) => value === null ? "—" : value < 1_000 ? `${Math.round(value)} ms` : `${(value / 1_000).toFixed(value >= 10_000 ? 1 : 2)} s`;
 const tokenLabel = (value: number | null) => value === null ? "—" : numberLabel.format(value);
 const rateLabel = (value: number | null) => value === null ? "—" : value.toFixed(1);
 const percentageLabel = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(value === 0 ? 0 : 1)}%`;
 
-function Dialog({ title, onClose, children, className = "" }: { title: string; onClose(): void; children: ReactNode; className?: string }) {
-  return <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className={`dialog ${className}`} role="dialog" aria-modal="true" aria-label={title}>
-      <header className="dialog-header"><h2>{title}</h2><button className="icon-button" type="button" aria-label="关闭" onClick={onClose}><CloseIcon /></button></header>
-      {children}
-    </section>
-  </div>;
-}
-
 export function App() {
-  const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(() => readStorage(savedSessionKey));
-  const [events, setEvents] = useState<Event[]>([]);
-  const [connection, setConnection] = useState<Connection>("loading");
+  const { sessions, selectedId, listError, expandedWorkspaces, refreshSessions,
+    selectSession: selectCatalogSession, toggleWorkspace } = useSessionCatalog();
   const [service, setService] = useState<ServiceStatus>({ status: "failed", model: "unknown", api_key: { configured: false, source: "none" } });
   const [commandError, setCommandError] = useState<string | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState("");
   const [directoryListing, setDirectoryListing] = useState<DirectoryListing | null>(null);
   const [browsingDirectories, setBrowsingDirectories] = useState(false);
@@ -83,11 +70,10 @@ export function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStorage(collapsedKey) === "true");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(readApprovalMode);
-  const [expandedWorkspaces, setExpandedWorkspaces] = useState<Set<string>>(() => new Set());
   const bottomRef = useRef<HTMLDivElement>(null);
   const directoryRequest = useRef(0);
   const permissionPickerRef = useRef<HTMLDivElement>(null);
-  const eventsRef = useRef<Event[]>([]);
+  const { events, connection, streamError, clearStreamError } = useSessionStream(selectedId);
   const projection = useMemo(() => projectChat(events), [events]);
   const latestRun = projection.runs.at(-1) ?? null;
   const latestMetrics = latestRun ? summarizeChatRun(latestRun) : null;
@@ -98,23 +84,6 @@ export function App() {
   const selected = sessions.find((session) => session.session_id === selectedId) ?? null;
   const visibleError = commandError ?? streamError ?? listError;
   const freshSession = !selected || projection.runs.length === 0;
-
-  const refreshSessions = useCallback(async (signal?: AbortSignal) => {
-    const next = sortSessionsByRecent(await loadSessions(signal));
-    setSessions(next); setListError(null);
-    setExpandedWorkspaces((current) => current.size ? current : new Set(next.map((session) => session.workspace_root)));
-    setSelectedId((current) => {
-      const choice = current && next.some((session) => session.session_id === current) ? current : next[0]?.session_id ?? null;
-      writeStorage(savedSessionKey, choice); return choice;
-    });
-  }, []);
-
-  useEffect(() => {
-    const control = new AbortController();
-    const update = () => void refreshSessions(control.signal).catch((failure: unknown) => { if (!control.signal.aborted) setListError(failure instanceof Error ? failure.message : "无法读取会话列表"); });
-    update(); const timer = window.setInterval(update, 2500);
-    return () => { control.abort(); window.clearInterval(timer); };
-  }, [refreshSessions]);
 
   useEffect(() => {
     if (!permissionMenuOpen) return;
@@ -132,38 +101,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId) { eventsRef.current = []; setEvents([]); setConnection("offline"); return; }
-    let disposed = false; let source: EventSource | undefined; let retry: number | undefined;
-    const control = new AbortController();
-    const reconnect = () => { source?.close(); if (disposed) return; setConnection("reconnecting"); if (retry !== undefined) window.clearTimeout(retry); retry = window.setTimeout(() => { retry = undefined; void connect(); }, 400); };
-    const connect = async () => {
-      try {
-        setConnection("loading"); const history = await loadHistory(selectedId, control.signal); if (disposed) return;
-        eventsRef.current = history; setEvents(history);
-        source = new EventSource(`/api/sessions/${encodeURIComponent(selectedId)}/events?after=${history.at(-1)?.seq ?? 0}`);
-        source.onopen = () => { if (!disposed) { setConnection("live"); setStreamError(null); } };
-        source.addEventListener("execution", (incoming) => {
-          try { const next = appendCanonicalEvent(eventsRef.current, parseStreamEvent((incoming as MessageEvent<string>).data)); eventsRef.current = next; setEvents(next); }
-          catch (failure) { setStreamError(failure instanceof EventSequenceError ? "流式读取时历史已变化，正在重建视图。" : "事件流包含无效数据。"); reconnect(); }
-        });
-        source.onerror = reconnect;
-      } catch (failure) {
-        if (disposed || control.signal.aborted) return;
-        setConnection("offline"); setStreamError(failure instanceof Error ? failure.message : "无法读取会话历史");
-        if (retry !== undefined) window.clearTimeout(retry); retry = window.setTimeout(() => { retry = undefined; void connect(); }, 1000);
-      }
-    };
-    void connect(); return () => { disposed = true; control.abort(); source?.close(); if (retry !== undefined) window.clearTimeout(retry); };
-  }, [selectedId]);
-
-  useEffect(() => {
     if (awaitingRun && projection.runs.some((run) => run.runId === awaitingRun)) setAwaitingRun(null);
     if (settlingApproval && !projection.pendingApprovals.some((approval) => approval.approvalId === settlingApproval)) setSettlingApproval(null);
     if (cancelling && (!projection.activeRunId || projection.runs.some((run) => run.runId === projection.activeRunId && run.cancelRequested))) setCancelling(false);
     bottomRef.current?.scrollIntoView({ block: "end", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [awaitingRun, cancelling, projection, settlingApproval]);
 
-  const selectSession = (id: string) => { setSelectedId(id); writeStorage(savedSessionKey, id); setCommandError(null); setStreamError(null); setUncertain(false); setMobileNavOpen(false); };
+  const selectSession = (id: string) => { selectCatalogSession(id); setCommandError(null); clearStreamError(); setUncertain(false); setMobileNavOpen(false); };
   const mutationFailed = (failure: unknown) => {
     const deliveryUncertain = !(failure instanceof CommandDeliveryError) || failure.uncertain;
     const detail = failure instanceof Error ? failure.message : "命令发送失败";
@@ -198,7 +142,6 @@ export function App() {
     if (mode === "full_access" && approvalMode !== "full_access") setPermissionWarningOpen(true);
     else saveApprovalMode(mode);
   };
-  const toggleWorkspace = (root: string) => setExpandedWorkspaces((current) => { const next = new Set(current); if (next.has(root)) next.delete(root); else next.add(root); return next; });
   const browseWorkspace = async (path?: string) => {
     const request = ++directoryRequest.current; setBrowsingDirectories(true); setDirectoryError(null);
     try {
@@ -251,26 +194,6 @@ export function App() {
     }
   };
 
-  const navigation = <>
-    <div className="brand"><FossilMark className="brand-mark" /><div className="brand-copy"><strong>Fosil Local</strong><small>本地构建</small></div><span className="build-badge">LOCAL</span><button className="icon-button desktop-collapse" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} onClick={toggleSidebar}><PanelIcon /></button></div>
-    <button className="new-session-button" type="button" onClick={openWorkspaceDialog}><PlusIcon /><span>新建会话</span></button>
-    <div className="session-heading"><span>工作区</span><div className="workspace-heading-actions"><span>{workspaceGroups.length}</span><button type="button" aria-label="添加工作区" title="添加本地工作区" onClick={openWorkspaceDialog}><PlusIcon /></button></div></div>
-    <nav className="workspace-list" aria-label="已保存会话">
-      {workspaceGroups.map((group) => {
-        const expanded = expandedWorkspaces.has(group.root); return <section className="workspace-group" key={group.root}>
-          <div className="workspace-row"><button className="workspace-toggle" type="button" aria-expanded={expanded} onClick={() => toggleWorkspace(group.root)} title={group.root}>
-            <ChevronIcon className={expanded ? "open" : ""} /><FolderIcon /><span><strong>{group.name}</strong><small>{group.sessions.length} 个会话 · {timeLabel(group.updatedAt)}</small></span>
-          </button><button className="row-delete" type="button" aria-label={`删除工作区记录：${group.name}`} title="删除该工作区的全部会话记录" onClick={() => requestDelete({ kind: "workspace", root: group.root, name: group.name, count: group.sessions.length })}><TrashIcon /></button></div>
-          {expanded && <div className="session-list">{group.sessions.map((session) => <div className="session-row" key={session.session_id}><button type="button" className={session.session_id === selectedId ? "session active" : "session"} onClick={() => selectSession(session.session_id)} title={`${session.title} · ${session.session_id}`}>
-            <span className="session-dot" aria-hidden="true" /><span><strong>{session.title}</strong><small>{timeLabel(session.updated_at)}</small></span><StatusPill status={session.activity} compact />
-          </button><button className="row-delete" type="button" aria-label={`删除会话：${session.title}`} title="删除会话记录" onClick={() => requestDelete({ kind: "session", session })}><TrashIcon /></button></div>)}</div>}
-        </section>;
-      })}
-      {!sessions.length && <p className="empty-sidebar">还没有会话。选择一个绝对路径，开始保存本地执行历史。</p>}
-    </nav>
-    <button className="settings-button" type="button" onClick={() => setSettingsOpen(true)}><SettingsIcon /><span>设置</span></button>
-  </>;
-
   const composer = <form className="composer" onSubmit={submit}>
     <label className="sr-only" htmlFor="message">消息</label>
     <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder={selected ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={2} />
@@ -289,7 +212,13 @@ export function App() {
   </form>;
 
   return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${freshSession ? "fresh-session" : ""}`}>
-    <aside className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`}>{navigation}</aside>
+    <aside className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`}><Navigation
+      groups={workspaceGroups} sessions={sessions} selectedId={selectedId} expandedWorkspaces={expandedWorkspaces}
+      sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} onOpenWorkspace={openWorkspaceDialog}
+      onToggleWorkspace={toggleWorkspace} onSelectSession={selectSession}
+      onDeleteSession={(session) => requestDelete({ kind: "session", session })}
+      onDeleteWorkspace={(group) => requestDelete({ kind: "workspace", root: group.root, name: group.name, count: group.sessions.length })}
+      onOpenSettings={() => setSettingsOpen(true)} /></aside>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
     <main className="workspace">
       <header className="topbar">

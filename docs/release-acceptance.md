@@ -34,7 +34,7 @@ npm run acceptance:release -- --live
 After the build has completed, a temporary ignored `.env` file may supply the process environment without adding a secret-bearing command argument:
 
 ```sh
-node --env-file=.env packages/server/dist/release-cli.js --live
+node --env-file=.env packages/acceptance/dist/release-cli.js --live
 ```
 
 The driver creates an isolated Git fixture beneath `artifacts/release-acceptance/`, records a failing addition test and a separate pre-existing user change, then opens the product browser. The live agent must read both relevant files, run the exact failing test, obtain persisted approvals for only that test and the exact managed repair, rerun the same test once, and finish. Any other gated command or edit fails the acceptance without being approved. The driver reloads the browser while the first approval is pending, reloads the completed run, inspects Trace, restarts the product service, compares the saved prefix, and submits a new tool-free turn after reopening.

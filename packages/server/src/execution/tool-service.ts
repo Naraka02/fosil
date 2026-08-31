@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { toolRequiresApproval, parseEventInput, parseToolInvocation, type ApprovalMode, type Event, type EventInput, type ToolInvocation } from "@fosil/contracts";
 import { replay, type RunState, type ToolState } from "@fosil/core";
-import { executeFileTool, FileToolError, ToolCancelled } from "./file-tools.js";
-import { executeShellTool } from "./shell-tools.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
+import { executeFileTool, FileToolError, ToolCancelled } from "../tools/file-tools.js";
+import { executeShellTool } from "../tools/shell-tools.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
 type Finished = Extract<Event, { type: "tool.finished" }>;
 type FinishedData = Finished["data"];

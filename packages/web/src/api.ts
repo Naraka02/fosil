@@ -4,7 +4,7 @@ import {
   type Command, type CommandAck, type DeletionResult, type DirectoryListing, type Event, type ProviderCredentialStatus,
   type ServiceStatus, type SessionList, type SessionSummary
 } from "@fosil/contracts";
-import { appendCanonicalEvent } from "./chat-model.js";
+import { appendCanonicalEvent } from "./features/chat/chat-model.js";
 
 export type { ServiceStatus } from "@fosil/contracts";
 

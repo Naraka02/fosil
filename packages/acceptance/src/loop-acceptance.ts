@@ -3,10 +3,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Event, ModelOutput, ModelRequestContext } from "@fosil/contracts";
-import { AgentLoopService } from "./agent-loop.js";
-import type { ModelProvider } from "./model-provider.js";
+import { AgentLoopService, SqliteWorkerStore, type ModelProvider } from "@fosil/server";
 import type { AcceptanceCase, FoundationReport } from "./foundation-acceptance.js";
-import { SqliteWorkerStore } from "./store.js";
 import { runAcceptanceGit } from "./acceptance-git.js";
 
 const unknownUsage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
@@ -100,9 +98,8 @@ export async function runLoopAcceptance(directory: string, source: Record<string
       "Shell approval is not host isolation. Post-crash process cleanup, workspace blocker resolution and arbitrary shell-change attribution remain outside this checkpoint."
     ], cases: []
   };
-  const workerUrl = new URL("../dist/storage-worker.js", import.meta.url);
   const database = join(directory, "events.db");
-  let store = new SqliteWorkerStore(workerUrl);
+  let store = new SqliteWorkerStore();
 
   async function scenario(id: string, title: string, explanation: string, action: (context: {
     root: string; sessionId: string; runId: string; result: AcceptanceCase;
@@ -244,7 +241,7 @@ export async function runLoopAcceptance(directory: string, source: Record<string
           assert.equal(typeof event.data.timings.duration_ms, "number");
         }
       });
-      await store.close(); store = new SqliteWorkerStore(workerUrl);
+      await store.close(); store = new SqliteWorkerStore();
       const recovery = await store.open(database);
       await c.check("Reopening saved history preserves exact events and executes no second verification", async () => {
         assert.deepEqual(recovery.recovered_sessions, []);

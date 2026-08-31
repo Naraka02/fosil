@@ -6,6 +6,7 @@
     "node": ">=24.0.0 <25"
   },
   "workspaces": [
+    "packages/acceptance",
     "packages/contracts",
     "packages/core",
     "packages/server",
@@ -13,22 +14,22 @@
   ],
   "scripts": {
     "prestart": "npm run build",
-    "start": "node packages/server/dist/product-cli.js",
-    "build": "tsc -b && vite build --config packages/web/vite.config.ts",
-    "typecheck": "tsc -b --pretty false",
+    "start": "node packages/server/dist/product/product-cli.js",
+    "build": "tsc -b && node scripts/verify-structure.mjs && vite build --config packages/web/vite.config.ts",
+    "typecheck": "tsc -b --pretty false && tsc -p tsconfig.tests.json --pretty false",
     "pretest": "npm run build",
     "test": "vitest run",
-    "pretest:watch": "tsc -b --pretty false",
+    "pretest:watch": "npm run typecheck",
     "test:watch": "vitest",
-    "sqlite:probe": "node packages/server/dist/sqlite-probe.js",
+    "sqlite:probe": "node packages/server/dist/storage/sqlite-probe.js",
     "preacceptance:foundation": "tsc -b --pretty false",
-    "acceptance:foundation": "node packages/server/dist/foundation-cli.js",
+    "acceptance:foundation": "node packages/acceptance/dist/foundation-cli.js",
     "preacceptance:loop": "tsc -b --pretty false",
-    "acceptance:loop": "node packages/server/dist/loop-cli.js",
+    "acceptance:loop": "node packages/acceptance/dist/loop-cli.js",
     "preacceptance:release": "npm run build",
-    "acceptance:release": "node packages/server/dist/release-cli.js",
+    "acceptance:release": "node packages/acceptance/dist/release-cli.js",
     "preacceptance:serve": "tsc -b --pretty false",
-    "acceptance:serve": "node packages/server/dist/foundation-viewer-cli.js"
+    "acceptance:serve": "node packages/acceptance/dist/foundation-viewer-cli.js"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

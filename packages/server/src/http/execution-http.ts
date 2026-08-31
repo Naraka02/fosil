@@ -8,9 +8,9 @@ import {
   sequenceTextSchema, sessionListQuerySchema, sessionParamsSchema, streamQuerySchema, workspaceDeleteRequestSchema,
   type Command, type CommandAck, type ProviderCredentialStatus
 } from "@fosil/contracts";
-import { AgentLoopService, type AgentLoopOptions } from "./agent-loop.js";
+import { AgentLoopService, type AgentLoopOptions } from "../execution/agent-loop.js";
 import { listLocalDirectories, LocalDirectoryError } from "./local-directories.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 import { StreamStopped, streamPause, writeSseFrame } from "./sse.js";
 import { browserEventPreview } from "./browser-preview.js";
 

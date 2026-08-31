@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { DeepSeekModel } from "./deepseek-responses.js";
+import type { DeepSeekModel } from "../providers/deepseek-responses.js";
 
 export interface ProductConfig {
   database: string;

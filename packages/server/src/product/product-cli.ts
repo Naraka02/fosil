@@ -1,11 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { deepSeekContextPolicy } from "./context-compaction.js";
-import { ExecutionHttpServer } from "./execution-http.js";
+import { deepSeekContextPolicy } from "../execution/context-compaction.js";
+import { ExecutionHttpServer } from "../http/execution-http.js";
 import { parseProductConfig, productHelp } from "./product-config.js";
-import { RuntimeDeepSeekProvider } from "./runtime-deepseek-provider.js";
-import { SqliteWorkerStore } from "./store.js";
+import { RuntimeDeepSeekProvider } from "../providers/runtime-deepseek-provider.js";
+import { SqliteWorkerStore } from "../storage/store.js";
 
 const codingInstructions = [
   "You are Fosil, a local coding agent. Complete the user's task in the session workspace using the supplied tools.",
@@ -22,12 +22,12 @@ async function main(): Promise<void> {
     throw new Error("Refusing to contact the model provider while TLS certificate verification is disabled");
   }
   await mkdir(dirname(config.database), { recursive: true, mode: 0o700 });
-  const store = new SqliteWorkerStore(new URL("./storage-worker.js", import.meta.url), { maskSecrets: config.maskSecrets });
+  const store = new SqliteWorkerStore(new URL("../storage/storage-worker.js", import.meta.url), { maskSecrets: config.maskSecrets });
   let server: ExecutionHttpServer | undefined;
   try {
     await store.open(config.database);
     const provider = new RuntimeDeepSeekProvider(config.apiKey);
-    const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+    const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../web/dist");
     server = new ExecutionHttpServer({
       store, webRoot, providerCredentials: provider,
       loop: {

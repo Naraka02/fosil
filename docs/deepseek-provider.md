@@ -20,7 +20,7 @@ The launcher configures high reasoning and a 64,000-token maximum output for exe
 
 ## Request translation
 
-[DeepSeekResponsesProvider](../packages/server/src/deepseek-responses.ts) sends `POST https://api.deepseek.com/responses` with native Node `fetch`. Production construction fixes the official HTTPS endpoint. Tests may inject a fetch implementation and endpoint without changing the launcher. The adapter has no vendor SDK and treats the API as stateless.
+[DeepSeekResponsesProvider](../packages/server/src/providers/deepseek-responses.ts) sends `POST https://api.deepseek.com/responses` with native Node `fetch`. Production construction fixes the official HTTPS endpoint. Tests may inject a fetch implementation and endpoint without changing the launcher. The adapter has no vendor SDK and treats the API as stateless.
 
 The exact provider-neutral context saved in `model.request.started` is translated as follows:
 

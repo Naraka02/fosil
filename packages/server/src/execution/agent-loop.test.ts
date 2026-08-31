@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Event, EventInput, ModelOutput, ModelRequestContext } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { AgentLoopService } from "./agent-loop.js";
-import { ModelProviderRequestError, type ModelProvider } from "./model-provider.js";
-import { SqliteWorkerStore, StoreError } from "./store.js";
+import { ModelProviderRequestError, type ModelProvider } from "../providers/model-provider.js";
+import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
 const directories: string[] = [];
 const stores: SqliteWorkerStore[] = [];
@@ -136,7 +136,7 @@ describe("agent loop context compaction", () => {
 async function fixture(content = "Inspect the controlled fixture", shared?: { store: HookStore; database: string }, storeOptions: ConstructorParameters<typeof SqliteWorkerStore>[1] = {}) {
   const root = await mkdtemp(join(tmpdir(), "fosil-agent-loop-"));
   directories.push(root);
-  const store = shared?.store ?? new HookStore(new URL("../dist/storage-worker.js", import.meta.url), storeOptions);
+  const store = shared?.store ?? new HookStore(new URL("../../dist/storage/storage-worker.js", import.meta.url), storeOptions);
   const database = shared?.database ?? join(root, "events.db");
   if (!shared) { stores.push(store); await store.open(database); }
   await writeFile(join(root, "target.txt"), "before\n");
@@ -332,7 +332,7 @@ describe("agent loop execution", () => {
     expect(await readFile(join(f.root, "target.txt"), "utf8")).toBe("later user change\n");
     await service.close();
     await f.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
     stores.push(reopened);
     await reopened.open(f.database);
     expect(await loop({ store: reopened }, p.adapter).run(f.sessionId, f.runId)).toEqual(result);
@@ -657,7 +657,7 @@ describe("agent loop persistence barriers", () => {
     }
     await service.close();
     await f.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
     stores.push(reopened);
     await reopened.open(f.database);
     const reopenedFixture = { store: reopened, sessionId: f.sessionId };
@@ -689,7 +689,7 @@ describe("agent loop persistence barriers", () => {
     expect(p.requests).toHaveLength(1);
     await service.close();
     await f.store.close();
-    const reopened = new SqliteWorkerStore(new URL("../dist/storage-worker.js", import.meta.url));
+    const reopened = new SqliteWorkerStore(new URL("../../dist/storage/storage-worker.js", import.meta.url));
     stores.push(reopened);
     const recovery = await reopened.open(f.database);
     expect(recovery.blocked_workspaces.map((blocker) => blocker.workspace_root)).toEqual([f.root]);

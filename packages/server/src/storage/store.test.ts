@@ -12,8 +12,8 @@ import { SqliteWorkerStore, type StoreOptions } from "./store.js";
 const stores: SqliteWorkerStore[] = [];
 const children: ChildProcess[] = [];
 const directories: string[] = [];
-const workerUrl = new URL("../dist/storage-worker.js", import.meta.url);
-const storeModule = new URL("../dist/store.js", import.meta.url).href;
+const workerUrl = new URL("../../dist/storage/storage-worker.js", import.meta.url);
+const storeModule = new URL("../../dist/storage/store.js", import.meta.url).href;
 const validInput = {
   schema_version: 1, session_id: "session-storage-test", type: "session.created",
   recorded_at: "2026-08-27T00:00:00.000Z", data: { workspace_root: "/tmp/fixture", created_by: "user" }
