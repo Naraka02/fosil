@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parseShellToolInvocation, type EventReason, type Evidence, type ExecutionError, type JsonValue, type ShellToolInvocation } from "@fosil/contracts";
@@ -10,6 +9,7 @@ const POLL_MS = 100;
 const TERM_GRACE_MS = 500;
 const KILL_GRACE_MS = 1000;
 const BWRAP = "/usr/bin/bwrap";
+const BWRAP_PROBE_MS = 1000;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 20));
 const elapsed = (since: number) => Math.max(0, Math.round(performance.now() - since));
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ESRCH";
@@ -25,7 +25,20 @@ export interface ShellToolExecution {
 
 export type ShellFileMode = "full_access" | "workspace_write";
 export interface ShellToolOptions { fileMode?: ShellFileMode; protectedFiles?: readonly string[] }
-export const workspaceShellSandboxAvailable = () => process.platform === "linux" && existsSync(BWRAP);
+let cachedWorkspaceShellSandboxAvailable: boolean | undefined;
+export const workspaceShellSandboxAvailable = () => {
+  if (cachedWorkspaceShellSandboxAvailable !== undefined) return cachedWorkspaceShellSandboxAvailable;
+  if (process.platform !== "linux") return cachedWorkspaceShellSandboxAvailable = false;
+  try {
+    const probe = spawnSync(BWRAP, [
+      "--die-with-parent", "--ro-bind", "/", "/", "--tmpfs", "/tmp",
+      "--proc", "/proc", "--dev", "/dev", "/bin/true"
+    ], { stdio: "ignore", timeout: BWRAP_PROBE_MS, killSignal: "SIGKILL" });
+    return cachedWorkspaceShellSandboxAvailable = probe.status === 0 && probe.signal === null && probe.error === undefined;
+  } catch {
+    return cachedWorkspaceShellSandboxAvailable = false;
+  }
+};
 
 interface Identity { pid: number; group: number; session: number; started: string; state: string }
 

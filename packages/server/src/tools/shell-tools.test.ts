@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseShellToolInvocation } from "@fosil/contracts";
-import { executeShellTool, type ShellToolExecution, type ShellToolOptions } from "./shell-tools.js";
+import { executeShellTool, workspaceShellSandboxAvailable, type ShellToolExecution, type ShellToolOptions } from "./shell-tools.js";
 import { ToolCancelled } from "./file-tools.js";
 
 vi.mock("node:fs/promises", async (original) => ({ ...await original<typeof import("node:fs/promises")>() }));
@@ -42,7 +42,7 @@ async function notRunning(pid: number) {
 }
 
 describe("bounded Linux shell executor", () => {
-  it("confines Workspace Write mutations and keeps protected workspace files read-only", async () => {
+  it("confines Workspace Write when Bubblewrap can launch and otherwise fails closed", async () => {
     const root = await directory();
     const outside = join(root, "..", `${root.split("/").at(-1)}-outside.txt`);
     const temporary = join("/tmp", `${root.split("/").at(-1)}-temporary.txt`);
@@ -54,6 +54,12 @@ describe("bounded Linux shell executor", () => {
     await writeFile(protectedFile, "protected");
     const command = `printf inside > inside.txt; printf outside > ${quote(outside)} 2>/dev/null || true; printf changed > .fosil/events.db 2>/dev/null || true; printf created > .fosil/events.db-wal 2>/dev/null || true; printf temporary > ${quote(temporary)}`;
     const value = await run(root, command, async () => {}, 3000, { fileMode: "workspace_write", protectedFiles: [protectedFile, protectedFutureFile] });
+    if (!workspaceShellSandboxAvailable()) {
+      expect(value).toMatchObject({ status: "failed", reason: "tool_failed", error: { code: "sandbox_unavailable" } });
+      await expect(readFile(join(root, "inside.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readFile(protectedFile, "utf8")).toBe("protected");
+      return;
+    }
     expect(value).toMatchObject({ status: "succeeded", result: { file_sandbox: { mode: "workspace_write", backend: "bubblewrap", enforcement: "partial" } } });
     expect(await readFile(join(root, "inside.txt"), "utf8")).toBe("inside");
     await expect(readFile(outside, "utf8")).rejects.toMatchObject({ code: "ENOENT" });

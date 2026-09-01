@@ -8,6 +8,7 @@ import { replay, workspaceBlockers } from "@fosil/core";
 import { FileToolService, type FileToolServiceOptions, type ToolAdvance } from "../execution/file-tool-service.js";
 import { ToolService } from "../execution/tool-service.js";
 import { executeFileTool, ToolCancelled } from "./file-tools.js";
+import { workspaceShellSandboxAvailable } from "./shell-tools.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 
 vi.mock("node:fs/promises", async (original) => ({ ...await original<typeof import("node:fs/promises")>() }));
@@ -126,10 +127,16 @@ describe("file tool service", () => {
     expect((await workspace.store.read(workspace.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
 
     const sandboxedShell = await fixture("shell", { command: "printf workspace" }, { approvalMode: "workspace_write" }, [], ToolService);
-    expect(finished(await sandboxedShell.advance()).data).toMatchObject({ status: "succeeded", result: {
-      stdout: { text: "workspace" }, file_sandbox: { mode: "workspace_write", backend: "bubblewrap", enforcement: "partial" }
-    } });
-    expect((await sandboxedShell.store.read(sandboxedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
+    const sandboxedAdvance = await sandboxedShell.advance();
+    if (workspaceShellSandboxAvailable()) {
+      expect(finished(sandboxedAdvance).data).toMatchObject({ status: "succeeded", result: {
+        stdout: { text: "workspace" }, file_sandbox: { mode: "workspace_write", backend: "bubblewrap", enforcement: "partial" }
+      } });
+      expect((await sandboxedShell.store.read(sandboxedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(0);
+    } else {
+      expect(sandboxedAdvance).toMatchObject({ status: "waiting_for_approval" });
+      expect((await sandboxedShell.store.read(sandboxedShell.sessionId)).filter((event) => event.type === "approval.requested")).toHaveLength(1);
+    }
 
     const fallbackShell = await fixture("shell", { command: "printf fallback" }, { approvalMode: "workspace_write", shellSandboxAvailable: false }, [], ToolService);
     expect(await fallbackShell.advance()).toMatchObject({ status: "waiting_for_approval" });
