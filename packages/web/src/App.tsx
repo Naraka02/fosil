@@ -5,7 +5,7 @@ import { projectChat, summarizeChatRuns, type PendingApproval } from "./features
 import { groupSessionsByWorkspace, workspaceName } from "./features/sessions/session-model.js";
 import { Markdown } from "./features/chat/Markdown.js";
 import { TraceView } from "./features/trace/TraceView.js";
-import { CheckIcon, ChevronIcon, FolderIcon, FossilMark, KeyIcon, MenuIcon, PanelIcon, PermissionIcon, SendIcon, SettingsIcon, TrashIcon } from "./shared/icons.js";
+import { CheckIcon, ChevronIcon, FolderIcon, FossilMark, KeyIcon, MenuIcon, PanelIcon, PermissionIcon, PlusIcon, SendIcon, SettingsIcon, TrashIcon } from "./shared/icons.js";
 import { Dialog } from "./shared/Dialog.js";
 import { StatusPill } from "./shared/ui.js";
 import { useSessionStream, type Connection } from "./features/sessions/useSessionStream.js";
@@ -55,7 +55,10 @@ export function App() {
   const [cancelling, setCancelling] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [view, setView] = useState<View>("chat");
-  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
+  const [workspacePickerMode, setWorkspacePickerMode] = useState<"new" | "switch">("new");
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [draftWorkspace, setDraftWorkspace] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [permissionWarningOpen, setPermissionWarningOpen] = useState(false);
   const [permissionMenuOpen, setPermissionMenuOpen] = useState(false);
@@ -71,18 +74,23 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStorage(collapsedKey) === "true");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(readApprovalMode);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const conversationRef = useRef<HTMLElement>(null);
   const directoryRequest = useRef(0);
   const permissionPickerRef = useRef<HTMLDivElement>(null);
-  const { events, connection, streamError, clearStreamError } = useSessionStream(selectedId);
+  const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const activeSessionId = draftWorkspace === null ? selectedId : null;
+  const { events, connection, streamError, clearStreamError } = useSessionStream(activeSessionId);
   const projection = useMemo(() => projectChat(events), [events]);
   const sessionMetrics = projection.runs.length ? summarizeChatRuns(projection.runs) : null;
   const latestRound = projection.runs.length;
   const activeRun = projection.runs.find((run) => run.runId === projection.activeRunId) ?? null;
   const effectiveApprovalMode = activeRun?.approvalMode ?? approvalMode;
   const workspaceGroups = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
-  const selected = sessions.find((session) => session.session_id === selectedId) ?? null;
+  const catalogSelected = sessions.find((session) => session.session_id === selectedId) ?? null;
+  const selected = draftWorkspace === null ? catalogSelected : null;
+  const sessionWorkspace = draftWorkspace ?? selected?.workspace_root ?? null;
   const visibleError = commandError ?? streamError ?? listError;
-  const freshSession = !selected || projection.runs.length === 0;
+  const freshSession = draftWorkspace !== null || !selected || projection.runs.length === 0;
 
   useEffect(() => {
     if (!permissionMenuOpen) return;
@@ -91,6 +99,14 @@ export function App() {
     document.addEventListener("pointerdown", dismiss); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
   }, [permissionMenuOpen]);
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) return;
+    const dismiss = (event: PointerEvent) => { if (!workspaceMenuRef.current?.contains(event.target as Node)) setWorkspaceMenuOpen(false); };
+    const escape = (event: KeyboardEvent) => { if (event.key === "Escape") setWorkspaceMenuOpen(false); };
+    document.addEventListener("pointerdown", dismiss); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
+  }, [workspaceMenuOpen]);
 
   useEffect(() => {
     const control = new AbortController();
@@ -106,23 +122,55 @@ export function App() {
     bottomRef.current?.scrollIntoView({ block: "end", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
   }, [awaitingRun, cancelling, projection, settlingApproval]);
 
-  const selectSession = (id: string) => { selectCatalogSession(id); setCommandError(null); clearStreamError(); setUncertain(false); setMobileNavOpen(false); };
+  useEffect(() => {
+    if (view !== "chat") return;
+    const frame = window.requestAnimationFrame(() => {
+      const conversation = conversationRef.current;
+      if (conversation) conversation.scrollTop = conversation.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId, view]);
+
+  const selectSession = (id: string) => { selectCatalogSession(id); setDraftWorkspace(null); setMessage(""); setCommandError(null); clearStreamError(); setUncertain(false); setWorkspacePickerOpen(false); setWorkspaceMenuOpen(false); setMobileNavOpen(false); };
   const mutationFailed = (failure: unknown) => {
     const deliveryUncertain = !(failure instanceof CommandDeliveryError) || failure.uncertain;
     const detail = failure instanceof Error ? failure.message : "命令发送失败";
     setCommandError(deliveryUncertain ? `${detail}。发送结果可能不确定，请刷新核对后再试。` : detail); setUncertain(deliveryUncertain);
   };
-  const createSession = async (event: FormEvent) => {
-    event.preventDefault(); if (!workspace.trim() || creating || uncertain) return;
-    setCreating(true); setCommandError(null);
-    try { const ack = await sendCommand({ type: "session.create", command_id: commandId(), workspace_root: workspace.trim() }); await refreshSessions(); selectSession(ack.session_id); setWorkspace(""); setNewSessionOpen(false); }
-    catch (failure) { mutationFailed(failure); } finally { setCreating(false); }
+  const beginDraft = (workspaceRoot: string) => {
+    if (!workspaceRoot.trim() || creating || uncertain) return;
+    setDraftWorkspace(workspaceRoot.trim()); setMessage(""); setCommandError(null); clearStreamError(); setWorkspace(""); setWorkspacePickerOpen(false); setWorkspaceMenuOpen(false); setView("chat"); setMobileNavOpen(false);
+  };
+  const switchDraftWorkspace = (workspaceRoot: string) => {
+    if (!workspaceRoot.trim() || creating || uncertain) return;
+    setDraftWorkspace(workspaceRoot.trim()); setCommandError(null); clearStreamError(); setWorkspace(""); setWorkspacePickerOpen(false); setWorkspaceMenuOpen(false); setView("chat"); setMobileNavOpen(false);
+  };
+  const chooseWorkspace = (event: FormEvent) => {
+    event.preventDefault();
+    if (workspacePickerMode === "switch" && draftWorkspace !== null) switchDraftWorkspace(workspace);
+    else beginDraft(workspace);
+  };
+  const newSession = () => {
+    const target = draftWorkspace ?? catalogSelected?.workspace_root ?? workspaceGroups[0]?.root;
+    if (target) beginDraft(target); else openWorkspacePicker("new");
   };
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); if (!selectedId || !message.trim() || projection.activeRunId || awaitingRun || uncertain) return;
+    event.preventDefault(); if ((!selectedId && !draftWorkspace) || !message.trim() || projection.activeRunId || awaitingRun || creating || uncertain) return;
     const content = message.trim(); setCommandError(null);
-    try { const ack = await sendCommand({ type: "run.submit", command_id: commandId(), session_id: selectedId, content, approval_mode: approvalMode }); setAwaitingRun(ack.run_id); setMessage(""); await refreshSessions(); }
+    let sessionId = selectedId;
+    try {
+      if (draftWorkspace !== null) {
+        setCreating(true);
+        const session = await sendCommand({ type: "session.create", command_id: commandId(), workspace_root: draftWorkspace });
+        sessionId = session.session_id;
+        await refreshSessions(); selectCatalogSession(sessionId); setDraftWorkspace(null); setWorkspaceMenuOpen(false); setWorkspace("");
+      }
+      if (!sessionId) return;
+      const ack = await sendCommand({ type: "run.submit", command_id: commandId(), session_id: sessionId, content, approval_mode: approvalMode });
+      setAwaitingRun(ack.run_id); setMessage(""); await refreshSessions();
+    }
     catch (failure) { mutationFailed(failure); }
+    finally { setCreating(false); }
   };
   const resolveApproval = async (approval: PendingApproval, decision: "allow" | "deny") => {
     if (!selectedId || settlingApproval || uncertain) return; setSettlingApproval(approval.approvalId); setCommandError(null);
@@ -156,11 +204,11 @@ export function App() {
     setBrowsingDirectories(false);
     setWorkspace(value);
   };
-  const openWorkspaceDialog = () => {
-    setNewSessionOpen(true); setDirectoryListing(null); setDirectoryError(null);
+  function openWorkspacePicker(mode: "new" | "switch" = "new") {
+    setWorkspacePickerMode(mode); setWorkspaceMenuOpen(false); setWorkspacePickerOpen(true); setDirectoryListing(null); setDirectoryError(null);
     void browseWorkspace(workspace.trim() || undefined);
-  };
-  const closeWorkspaceDialog = () => { directoryRequest.current++; setNewSessionOpen(false); setBrowsingDirectories(false); };
+  }
+  const closeWorkspacePicker = () => { directoryRequest.current++; setWorkspacePickerOpen(false); setBrowsingDirectories(false); };
   const confirmDelete = async () => {
     if (!deleteTarget || deleting || uncertain) return;
     setDeleting(true); setCommandError(null); setDeleteError(null);
@@ -198,11 +246,11 @@ export function App() {
     <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => {
       if (event.key !== "Enter" || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
       event.preventDefault(); event.currentTarget.form?.requestSubmit();
-    }} placeholder={selected ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={2} />
-      <div className="composer-footer"><span className="composer-context"><FolderIcon />{selected ? workspaceName(selected.workspace_root) : "尚未选择工作区"}</span><div className={`permission-picker permission-${effectiveApprovalMode}`} ref={permissionPickerRef}>
-        <button className="permission-trigger" type="button" aria-label={`权限审批模式：${approvalModeLabel[effectiveApprovalMode]}`} aria-haspopup="menu" aria-expanded={permissionMenuOpen} title={approvalModeTitle[effectiveApprovalMode]} disabled={!!projection.activeRunId || !!awaitingRun || uncertain} onClick={() => setPermissionMenuOpen((current) => !current)}><PermissionIcon /><span>{approvalModeLabel[effectiveApprovalMode]}</span><ChevronIcon className={permissionMenuOpen ? "open" : ""} /></button>
+    }} placeholder={sessionWorkspace ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!sessionWorkspace || !!projection.activeRunId || !!awaitingRun || creating || uncertain} rows={2} />
+      <div className="composer-footer">{sessionWorkspace && freshSession ? <div className="workspace-switcher" ref={workspaceMenuRef}><button className="composer-context workspace-switch-trigger" type="button" aria-label={`切换新会话工作区，当前为 ${workspaceName(sessionWorkspace)}`} aria-haspopup="menu" aria-expanded={workspaceMenuOpen} onClick={() => setWorkspaceMenuOpen((current) => !current)}><FolderIcon /><span>{workspaceName(sessionWorkspace)}</span><ChevronIcon className={workspaceMenuOpen ? "open" : ""} /></button>{workspaceMenuOpen && <section className="workspace-switch-menu" role="menu" aria-label="切换新会话工作区"><header><strong>新会话工作区</strong><span>发送第一条消息时才会创建会话</span></header><div>{workspaceGroups.map((group) => <button key={group.root} type="button" role="menuitemradio" aria-checked={group.root === sessionWorkspace} disabled={group.root === sessionWorkspace || creating} onClick={() => switchDraftWorkspace(group.root)}><FolderIcon /><span><strong>{group.name}</strong><small>{group.root}</small></span>{group.root === sessionWorkspace && <CheckIcon />}</button>)}</div><footer><button type="button" onClick={() => openWorkspacePicker("switch")}><PlusIcon />选择其他本地目录</button></footer></section>}</div> : <span className="composer-context"><FolderIcon />{sessionWorkspace ? workspaceName(sessionWorkspace) : "尚未选择工作区"}</span>}<div className={`permission-picker permission-${effectiveApprovalMode}`} ref={permissionPickerRef}>
+        <button className="permission-trigger" type="button" aria-label={`权限审批模式：${approvalModeLabel[effectiveApprovalMode]}`} aria-haspopup="menu" aria-expanded={permissionMenuOpen} title={approvalModeTitle[effectiveApprovalMode]} disabled={!!projection.activeRunId || !!awaitingRun || creating || uncertain} onClick={() => setPermissionMenuOpen((current) => !current)}><PermissionIcon /><span>{approvalModeLabel[effectiveApprovalMode]}</span><ChevronIcon className={permissionMenuOpen ? "open" : ""} /></button>
         {permissionMenuOpen && <section className="permission-menu" role="menu" aria-label="选择权限审批模式"><header><div><strong>权限审批模式</strong><span>用于下一次运行</span></div><kbd>ESC</kbd></header><div className="permission-options">{approvalModes.map((mode) => <button key={mode} type="button" role="menuitemradio" aria-checked={approvalMode === mode} className={approvalMode === mode ? "selected" : ""} onClick={() => chooseApprovalMode(mode)}><span className={`permission-option-icon permission-option-${mode}`}><PermissionIcon /></span><span className="permission-option-copy"><strong>{approvalModeLabel[mode]}{mode === "full_access" && <em>高风险</em>}</strong><small>{approvalModeTitle[mode]}</small></span>{approvalMode === mode && <CheckIcon className="permission-check" />}</button>)}</div><footer>所选模式会持久化到运行记录与 Trace</footer></section>}
-      </div><span className="composer-hint">{projection.activeRunId ? "当前会话正在执行" : "Enter 发送 · Shift+Enter 换行"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
+      </div><span className="composer-hint">{creating ? "正在创建会话" : projection.activeRunId ? "当前会话正在执行" : "Enter 发送 · Shift+Enter 换行"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!sessionWorkspace || !message.trim() || !!projection.activeRunId || !!awaitingRun || creating || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
       {sessionMetrics && <div className="composer-metrics" aria-label={`当前 Session 共 ${latestRound} 轮、${sessionMetrics.steps} 步的累计运行统计`} title="所有指标均累计当前 Session 的全部轮次。速度按总输出 token 除以模型总生成阶段耗时计算；缓存命中按总缓存读取 token 除以总输入 token 计算。">
         <span><b>{latestRound}</b> 轮 <b>{sessionMetrics.steps}</b> 步</span>
         <span>LLM 调用 <b>{durationLabel(sessionMetrics.llmDurationMs)}</b> 工具调用 <b>{durationLabel(sessionMetrics.toolDurationMs)}</b></span>
@@ -213,25 +261,43 @@ export function App() {
     </div>
   </form>;
 
-  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${freshSession ? "fresh-session" : ""}`}>
+  return <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${freshSession && !workspacePickerOpen ? "fresh-session" : ""}`}>
     <aside className={`sidebar ${mobileNavOpen ? "mobile-open" : ""}`}><Navigation
-      groups={workspaceGroups} sessions={sessions} selectedId={selectedId} expandedWorkspaces={expandedWorkspaces}
-      sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} onOpenWorkspace={openWorkspaceDialog}
+      groups={workspaceGroups} sessions={sessions} selectedId={draftWorkspace === null ? selectedId : null} expandedWorkspaces={expandedWorkspaces}
+      sidebarCollapsed={sidebarCollapsed} creating={creating} onToggleSidebar={toggleSidebar} onNewSession={newSession} onOpenWorkspace={() => openWorkspacePicker("new")}
+      onCreateSession={beginDraft}
       onToggleWorkspace={toggleWorkspace} onSelectSession={selectSession}
       onDeleteSession={(session) => requestDelete({ kind: "session", session })}
       onDeleteWorkspace={(group) => requestDelete({ kind: "workspace", root: group.root, name: group.name, count: group.sessions.length })}
       onOpenSettings={() => setSettingsOpen(true)} /></aside>
     {mobileNavOpen && <button className="mobile-scrim" aria-label="关闭导航" onClick={() => setMobileNavOpen(false)} />}
     <main className="workspace">
-      <header className="topbar">
+      {workspacePickerOpen ? <section className="workspace-picker-view" aria-labelledby="workspace-picker-title"><header><button className="icon-button mobile-menu" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}><MenuIcon /></button><div><p className="eyebrow">新建会话</p><h1 id="workspace-picker-title">选择工作区</h1><p>发送第一条消息时才会创建会话。</p></div><button className="secondary" type="button" onClick={closeWorkspacePicker}>返回</button></header>{visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>立即刷新</button>}</div>}<form onSubmit={chooseWorkspace}>
+        {workspaceGroups.length > 0 && <section className="known-workspaces" aria-labelledby="known-workspaces-title"><div><h2 id="known-workspaces-title">已有工作区</h2><p>选择后进入同一个新对话草稿。</p></div><div>{workspaceGroups.map((group) => <button key={group.root} type="button" onClick={() => workspacePickerMode === "switch" && draftWorkspace !== null ? switchDraftWorkspace(group.root) : beginDraft(group.root)} disabled={creating} title={group.root}><FolderIcon /><span><strong>{group.name}</strong><small>{group.root}</small></span><PlusIcon /></button>)}</div></section>}
+        <div className="workspace-browser-inline"><div className="workspace-browser-heading"><h2>其他本地目录</h2><p>只读取目录名称，不读取文件内容。</p></div><div className="workspace-path-row"><div className="path-field"><FolderIcon /><label className="sr-only" htmlFor="workspace">工作区路径</label><input id="workspace" autoFocus value={workspace} onChange={(event) => editWorkspace(event.target.value)} placeholder="/home/me/project" required /></div><button className="secondary" type="button" onClick={() => void browseWorkspace(workspace.trim())} disabled={browsingDirectories || !workspace.trim()}>转到</button></div>
+          <div className="directory-browser" aria-busy={browsingDirectories}>
+            <header><strong>本地目录</strong><span>{directoryListing?.path ?? (browsingDirectories ? "正在读取…" : "未加载")}</span></header>
+            <div className="directory-list">
+              {directoryListing?.parent && <button type="button" className="directory-row directory-parent" onClick={() => void browseWorkspace(directoryListing.parent!)} disabled={browsingDirectories} title={directoryListing.parent}><ChevronIcon /><FolderIcon /><span><strong>返回上级</strong><small>{directoryListing.parent}</small></span></button>}
+              {directoryListing?.directories.map((directory) => <button type="button" className="directory-row" key={directory.path} onClick={() => void browseWorkspace(directory.path)} disabled={browsingDirectories} title={directory.path}><ChevronIcon /><FolderIcon /><span><strong>{directory.name}</strong><small>{directory.path}</small></span></button>)}
+              {!browsingDirectories && directoryListing && !directoryListing.directories.length && <p className="directory-empty">此目录下没有可选择的子目录。</p>}
+              {browsingDirectories && <p className="directory-empty">正在读取本地目录…</p>}
+            </div>
+            {directoryListing?.truncated && <p className="directory-limit">仅显示排序后的前 500 个目录，可输入更具体的路径继续浏览。</p>}
+          </div>
+          {directoryError && <p className="directory-error" role="alert">{directoryError}。仍可直接输入有效绝对路径创建会话。</p>}
+          <button className="create-workspace-session" type="submit" disabled={creating || uncertain || !workspace.trim()}>使用此工作区</button>
+        </div>
+      </form></section> : <><header className="topbar">
         <button className="icon-button mobile-menu" type="button" aria-label="打开导航" onClick={() => setMobileNavOpen(true)}><MenuIcon /></button>
         <div className="session-context"><h1>{selected?.title ?? "Fosil"}</h1><p>{selected ? workspaceName(selected.workspace_root) : "本地执行"}</p></div>
         <div className="topbar-actions"><div className="view-switch" role="tablist" aria-label="会话视图"><button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "selected" : ""} onClick={() => setView("chat")}>对话</button><button role="tab" aria-selected={view === "trace"} className={view === "trace" ? "selected" : ""} onClick={() => setView("trace")}>轨迹</button></div><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connectionLabel[connection]}</span>{projection.activeRunId && <button className="cancel-button" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "取消中" : "取消运行"}</button>}</div>
       </header>
       {visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>立即刷新</button>}</div>}
-      {view === "chat" ? <div className="chat-view"><section className="conversation" aria-live="polite" aria-label="对话">
-        {!selected && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><p>从左侧新建会话，选择一个工作区开始构建。</p></div>}
-        {selected && !projection.runs.length && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><div className="welcome-context"><FolderIcon /><strong>{workspaceName(selected.workspace_root)}</strong><span /><StatusPill status={service.status} /></div></div>}
+      {view === "chat" ? <div className="chat-view"><section className="conversation" ref={conversationRef} aria-live="polite" aria-label="对话">
+        {draftWorkspace && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><div className="welcome-context"><FolderIcon /><strong>{workspaceName(draftWorkspace)}</strong><span /><small className="draft-state">发送后创建</small></div></div>}
+        {!draftWorkspace && !selected && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><p>从左侧新建会话，选择一个工作区开始构建。</p></div>}
+        {!draftWorkspace && selected && !projection.runs.length && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><div className="welcome-context"><FolderIcon /><strong>{workspaceName(selected.workspace_root)}</strong><span /><StatusPill status={service.status} /></div></div>}
         {projection.runs.map((run) => <article className="run" key={run.runId} data-run-status={run.status}>
           <div className="message user-message"><div className="message-meta"><strong>你</strong><StatusPill status={run.status} /></div><p>{run.userContent}</p></div>
           {run.activities.map((activity) => {
@@ -252,26 +318,8 @@ export function App() {
           {run.cancelRequested && run.status === "cancelling" && <p className="run-note">已请求取消，正在等待归属任务停止。</p>}
         </article>)}
         <div ref={bottomRef} />
-      </section>{composer}</div> : <TraceView events={events} />}
+      </section>{composer}</div> : <TraceView events={events} />}</>}
     </main>
-
-    {newSessionOpen && <Dialog title="选择本地工作区" onClose={closeWorkspaceDialog} className="new-session-dialog"><form onSubmit={createSession}>
-      <div className="dialog-body workspace-picker"><label htmlFor="workspace">工作区路径</label><div className="workspace-path-row"><div className="path-field"><FolderIcon /><input id="workspace" autoFocus value={workspace} onChange={(event) => editWorkspace(event.target.value)} placeholder="/home/me/project" required /></div><button className="secondary" type="button" onClick={() => void browseWorkspace(workspace.trim())} disabled={browsingDirectories || !workspace.trim()}>转到</button></div>
-        <p>选择已有本地目录，或输入绝对 Linux 路径后转到。这里只读取目录名称，不读取文件内容。</p>
-        <div className="directory-browser" aria-busy={browsingDirectories}>
-          <header><strong>本地目录</strong><span>{directoryListing?.path ?? (browsingDirectories ? "正在读取…" : "未加载")}</span></header>
-          <div className="directory-list">
-            {directoryListing?.parent && <button type="button" className="directory-row directory-parent" onClick={() => void browseWorkspace(directoryListing.parent!)} disabled={browsingDirectories} title={directoryListing.parent}><ChevronIcon /><FolderIcon /><span><strong>返回上级</strong><small>{directoryListing.parent}</small></span></button>}
-            {directoryListing?.directories.map((directory) => <button type="button" className="directory-row" key={directory.path} onClick={() => void browseWorkspace(directory.path)} disabled={browsingDirectories} title={directory.path}><ChevronIcon /><FolderIcon /><span><strong>{directory.name}</strong><small>{directory.path}</small></span></button>)}
-            {!browsingDirectories && directoryListing && !directoryListing.directories.length && <p className="directory-empty">此目录下没有可选择的子目录。</p>}
-            {browsingDirectories && <p className="directory-empty">正在读取本地目录…</p>}
-          </div>
-          {directoryListing?.truncated && <p className="directory-limit">仅显示排序后的前 500 个目录，可输入更具体的路径继续浏览。</p>}
-        </div>
-        {directoryError && <p className="directory-error" role="alert">{directoryError}。仍可直接输入有效绝对路径创建会话。</p>}
-      </div>
-      <footer className="dialog-actions"><button className="secondary" type="button" onClick={closeWorkspaceDialog}>取消</button><button type="submit" disabled={creating || uncertain || !workspace.trim()}>{creating ? "正在创建" : "在此创建会话"}</button></footer>
-    </form></Dialog>}
 
     {settingsOpen && <Dialog title="设置" onClose={() => setSettingsOpen(false)} className="settings-dialog"><div className="settings-layout">
       <nav aria-label="设置类别"><button className={settingsSection === "general" ? "selected" : ""} onClick={() => setSettingsSection("general")}><SettingsIcon />通用设置</button><button className={settingsSection === "provider" ? "selected" : ""} onClick={() => setSettingsSection("provider")}><KeyIcon />模型与 API</button><button className={settingsSection === "runtime" ? "selected" : ""} onClick={() => setSettingsSection("runtime")}><PanelIcon />运行时状态</button></nav>

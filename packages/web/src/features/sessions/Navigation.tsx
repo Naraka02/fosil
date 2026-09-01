@@ -8,15 +8,18 @@ const timeLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", {
 }).format(new Date(value));
 
 export function Navigation({ groups, sessions, selectedId, expandedWorkspaces, sidebarCollapsed,
-  onToggleSidebar, onOpenWorkspace, onToggleWorkspace, onSelectSession, onDeleteSession,
+  creating, onToggleSidebar, onNewSession, onOpenWorkspace, onCreateSession, onToggleWorkspace, onSelectSession, onDeleteSession,
   onDeleteWorkspace, onOpenSettings }: {
   groups: readonly WorkspaceSessions[];
   sessions: readonly SessionSummary[];
   selectedId: string | null;
   expandedWorkspaces: ReadonlySet<string>;
   sidebarCollapsed: boolean;
+  creating: boolean;
   onToggleSidebar(): void;
+  onNewSession(): void;
   onOpenWorkspace(): void;
+  onCreateSession(root: string): void;
   onToggleWorkspace(root: string): void;
   onSelectSession(id: string): void;
   onDeleteSession(session: SessionSummary): void;
@@ -25,7 +28,7 @@ export function Navigation({ groups, sessions, selectedId, expandedWorkspaces, s
 }) {
   return <>
     <div className="brand"><FossilMark className="brand-mark" /><div className="brand-copy"><strong>Fosil Local</strong><small>本地构建</small></div><span className="build-badge">LOCAL</span><button className="icon-button desktop-collapse" type="button" aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"} onClick={onToggleSidebar}><PanelIcon /></button></div>
-    <button className="new-session-button" type="button" onClick={onOpenWorkspace}><PlusIcon /><span>新建会话</span></button>
+    <button className="new-session-button" type="button" onClick={onNewSession} disabled={creating}><PlusIcon /><span>{creating ? "正在创建" : "新建会话"}</span></button>
     <div className="session-heading"><span>工作区</span><div className="workspace-heading-actions"><span>{groups.length}</span><button type="button" aria-label="添加工作区" title="添加本地工作区" onClick={onOpenWorkspace}><PlusIcon /></button></div></div>
     <nav className="workspace-list" aria-label="已保存会话">
       {groups.map((group) => {
@@ -33,7 +36,7 @@ export function Navigation({ groups, sessions, selectedId, expandedWorkspaces, s
         return <section className="workspace-group" key={group.root}>
           <div className="workspace-row"><button className="workspace-toggle" type="button" aria-expanded={expanded} onClick={() => onToggleWorkspace(group.root)} title={group.root}>
             <ChevronIcon className={expanded ? "open" : ""} /><FolderIcon /><span><strong>{group.name}</strong><small>{group.sessions.length} 个会话 · {timeLabel(group.updatedAt)}</small></span>
-          </button><button className="row-delete" type="button" aria-label={`删除工作区记录：${group.name}`} title="删除该工作区的全部会话记录" onClick={() => onDeleteWorkspace(group)}><TrashIcon /></button></div>
+          </button><div className="workspace-row-actions"><button className="workspace-new-session" type="button" aria-label={`在 ${group.name} 中新建对话`} title="在此工作区新建对话" onClick={() => onCreateSession(group.root)} disabled={creating}><PlusIcon /></button><button className="row-delete" type="button" aria-label={`删除工作区记录：${group.name}`} title="删除该工作区的全部会话记录" onClick={() => onDeleteWorkspace(group)}><TrashIcon /></button></div></div>
           {expanded && <div className="session-list">{group.sessions.map((session) => <div className="session-row" key={session.session_id}><button type="button" className={session.session_id === selectedId ? "session active" : "session"} onClick={() => onSelectSession(session.session_id)} title={`${session.title} · ${session.session_id}`}>
             <span className="session-dot" aria-hidden="true" /><span><strong>{session.title}</strong><small>{timeLabel(session.updated_at)}</small></span><StatusPill status={session.activity} compact />
           </button><button className="row-delete" type="button" aria-label={`删除会话：${session.title}`} title="删除会话记录" onClick={() => onDeleteSession(session)}><TrashIcon /></button></div>)}</div>}

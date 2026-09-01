@@ -44,6 +44,7 @@ describe("product Chat controls in a real browser", () => {
   it("configures a non-echoed API key and confirms record-only session and workspace deletion", async () => {
     await access(join(webRoot, "index.html"));
     const root = await mkdtemp(join(tmpdir(), "fosil-settings-browser-")); directories.push(root);
+    const otherRoot = await mkdtemp(join(tmpdir(), "fosil-settings-browser-other-")); directories.push(otherRoot);
     const marker = join(root, "workspace-file.txt"); await writeFile(marker, "preserved");
     const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
     let configuredKey: string | null = null;
@@ -60,6 +61,7 @@ describe("product Chat controls in a real browser", () => {
     const browser = await chromium.launch({ headless: true }); browsers.push(browser);
     const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
     await page.goto(origin, { waitUntil: "domcontentloaded" });
+    expect(Math.round((await page.locator(".sidebar").boundingBox())!.width)).toBe(304);
 
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("button", { name: "模型与 API", exact: true }).click();
@@ -75,25 +77,64 @@ describe("product Chat controls in a real browser", () => {
     expect(JSON.stringify(await (await fetch(origin + "/api/status")).json())).not.toContain(secret);
     await page.getByLabel("关闭").click();
 
-    const create = async () => {
+    const chooseDraft = async (workspaceRoot: string) => {
       await page.locator(".new-session-button").click();
-      await page.getByLabel("工作区路径").fill(root);
-      await page.getByRole("button", { name: "转到", exact: true }).click();
-      await page.locator(".directory-browser > header").getByText(root, { exact: true }).waitFor();
-      await page.getByRole("button", { name: "在此创建会话", exact: true }).click();
-      await page.locator(".session.active").waitFor();
+      if (await page.getByLabel("工作区路径").isVisible().catch(() => false)) {
+        expect(await page.locator(".dialog").count()).toBe(0);
+        await page.getByLabel("工作区路径").fill(workspaceRoot);
+        await page.getByRole("button", { name: "转到", exact: true }).click();
+        await page.locator(".directory-browser > header").getByText(workspaceRoot, { exact: true }).waitFor();
+        await page.getByRole("button", { name: "使用此工作区", exact: true }).click();
+      }
+      await page.getByText("发送后创建", { exact: true }).waitFor();
     };
-    await create();
+    const switchDraft = async (workspaceRoot: string) => {
+      await page.getByRole("button", { name: /切换新会话工作区/u }).click();
+      await page.getByRole("menu", { name: "切换新会话工作区" }).waitFor();
+      await page.getByRole("button", { name: "选择其他本地目录", exact: true }).click();
+      await page.getByRole("heading", { name: "选择工作区" }).waitFor();
+      await page.getByLabel("工作区路径").fill(workspaceRoot);
+      await page.getByRole("button", { name: "使用此工作区", exact: true }).click();
+      expect(await page.locator(".composer").count()).toBe(1);
+      expect((await store.listSessions()).sessions).toHaveLength(0);
+    };
+    await chooseDraft(root);
+    expect((await store.listSessions()).sessions).toHaveLength(0);
+    expect(await page.locator(".session-row").count()).toBe(0);
+    await switchDraft(otherRoot);
+    await switchDraft(root);
     await page.getByLabel("消息").fill("First saved session");
     await page.getByRole("button", { name: "发送" }).click();
     await page.getByText("Saved reply.").waitFor();
-    await create();
+    await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(1);
+
+    await page.locator(".new-session-button").click();
+    expect((await store.listSessions()).sessions).toHaveLength(1);
+    expect(await page.locator(".session.active").count()).toBe(0);
+    await page.getByLabel("消息").fill("Discard this draft");
+    await page.locator(".session").click();
+    await page.locator(".session.active").waitFor();
+    expect(await page.getByText("发送后创建", { exact: true }).count()).toBe(0);
+    expect(await page.getByLabel("消息").inputValue()).toBe("");
+
+    await page.locator(".new-session-button").click();
+    await page.getByLabel("消息").fill("Second saved session");
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(2);
+    await page.getByText("Saved reply.").waitFor();
     await page.locator(".session-row").filter({ has: page.locator(".session.active") }).getByRole("button", { name: /删除会话：/u }).click();
     await page.getByRole("heading", { name: "删除会话记录" }).waitFor();
     expect(await page.getByText("本地工作区目录和源文件不会被删除。").count()).toBe(1);
     await page.getByRole("button", { name: "删除会话", exact: true }).click();
     await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(1);
     expect(await readFile(marker, "utf8")).toBe("preserved");
+
+    const workspaceName = root.split("/").at(-1)!;
+    await page.getByRole("button", { name: `在 ${workspaceName} 中新建对话` }).click();
+    expect((await store.listSessions()).sessions).toHaveLength(1);
+    expect(await page.locator(".session.active").count()).toBe(0);
+    await page.locator(".session").click();
+    await page.locator(".session.active").waitFor();
 
     await page.getByRole("button", { name: /删除工作区记录：/u }).click();
     await page.getByRole("heading", { name: "删除工作区记录" }).waitFor();
@@ -146,9 +187,11 @@ describe("product Chat controls in a real browser", () => {
     await page.goto(origin, { waitUntil: "domcontentloaded" });
 
     await page.locator(".new-session-button").click();
+    expect(await page.locator(".dialog").count()).toBe(0);
     await page.getByLabel("工作区路径").fill(root);
-    await page.getByRole("button", { name: "在此创建会话", exact: true }).click();
-    await page.locator(".session.active").waitFor();
+    await page.getByRole("button", { name: "使用此工作区", exact: true }).click();
+    expect((await store.listSessions()).sessions).toHaveLength(0);
+    expect(await page.locator(".session-row").count()).toBe(0);
     const approvalMode = () => page.getByRole("button", { name: /权限审批模式：/ });
     expect(await approvalMode().getAttribute("aria-label")).toBe("权限审批模式：Read Only");
     await approvalMode().click();
@@ -233,6 +276,12 @@ describe("product Chat controls in a real browser", () => {
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
     expect(calls).toBe(5); expect(posts).toBe(7);
 
+    await page.getByRole("tab", { name: "轨迹" }).click();
+    await page.getByRole("heading", { name: "执行轨迹" }).waitFor();
+    await page.getByRole("tab", { name: "对话" }).click();
+    const conversation = page.locator(".conversation");
+    await expect.poll(async () => conversation.evaluate((element) => element.scrollTop + element.clientHeight >= element.scrollHeight - 2)).toBe(true);
+
     await page.setViewportSize({ width: 390, height: 844 });
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
@@ -261,8 +310,8 @@ describe("product Chat controls in a real browser", () => {
     let posts = 0; const external: string[] = [];
     page.on("request", (request) => { if (request.method() === "POST") posts++; if (new URL(request.url()).origin !== origin) external.push(request.url()); });
     await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await page.locator(".new-session-button").click(); await page.getByLabel("工作区路径").fill(root); await page.getByRole("button", { name: "在此创建会话", exact: true }).click();
-    await page.locator(".session.active").waitFor();
+    await page.locator(".new-session-button").click(); expect(await page.locator(".dialog").count()).toBe(0); await page.getByLabel("工作区路径").fill(root); await page.getByRole("button", { name: "使用此工作区", exact: true }).click();
+    expect((await store.listSessions()).sessions).toHaveLength(0);
     await page.getByLabel("消息").fill("Edit the target"); await page.getByRole("button", { name: "发送" }).click();
     await page.getByRole("button", { name: "仅允许本次" }).waitFor(); await page.getByRole("button", { name: "仅允许本次" }).click();
     await page.getByText("Target updated.").waitFor();
