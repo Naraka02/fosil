@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { ApprovalMode, Event } from "@fosil/contracts";
 import {
-  payloadFlags, projectTrace, projectTraceMessages, traceRecordHasError,
+  payloadFlags, projectTrace, projectTraceMessages, traceAssistantContent, traceRecordHasError,
   type ApprovalTraceRecord, type ContextTraceItem, type ModelTraceRecord, type SystemTraceItem,
   type ToolTraceRecord, type TraceMessageItem, type TraceRecord, type UserTraceItem
 } from "./trace-model.js";
@@ -26,21 +26,11 @@ const valueSummary = (value: unknown, limit = 150) => {
   if (!rendered) return "—";
   return rendered.length > limit ? `${rendered.slice(0, limit - 1)}…` : rendered;
 };
-const assistantResult = (item: ModelTraceRecord) => {
-  const finalText = compact(item.output?.text ?? "");
-  if (finalText) return finalText;
-  if (item.output?.tool_calls.length) return item.output.tool_calls.map((call) => `${call.name} ${valueSummary(call.arguments, 90)}`).join(" · ");
-  const streamedText = compact(item.deltas.filter((delta) => delta.kind === "text").map((delta) => delta.text ?? "").join(""));
-  if (streamedText) return streamedText;
-  const streamedCalls = item.deltas.filter((delta) => delta.kind === "tool_call").map((delta) => delta.name).filter((name): name is string => name !== null && name !== undefined);
-  if (streamedCalls.length) return streamedCalls.join(" · ");
-  return item.error?.message ? compact(item.error.message) : "—";
-};
 const timelinePreview = (item: TraceMessageItem) => {
-  if (item.kind === "system") return "Initial System Prompt";
+  if (item.kind === "system") return item.tools.length ? `Initial System Prompt · Tools: ${item.tools.map((tool) => tool.name).join(", ")}` : "Initial System Prompt · Tools: —";
   if (item.kind === "context") return contextSummary(item.content);
   if (item.kind === "user") return compact(item.content) || "空消息";
-  if (item.kind === "model") return assistantResult(item);
+  if (item.kind === "model") return traceAssistantContent(item);
   return "";
 };
 
@@ -82,8 +72,9 @@ function ModelDetail({ record }: { record: ModelTraceRecord }) {
     fragments: record.deltas.length,
     text: record.deltas.filter((delta) => delta.kind === "text").map((delta) => delta.text ?? "").join(""),
     reasoning: record.deltas.filter((delta) => delta.kind === "reasoning").map((delta) => delta.text ?? "").join("") || null,
-    tool_call_fragments: record.deltas.filter((delta) => delta.kind === "tool_call")
+    tool_call_fragments: record.deltas.filter((delta) => delta.kind === "tool_call").length
   };
+  const visibleOutput = record.output === null ? null : { text: record.output.text, reasoning: record.output.reasoning };
   return <>
     <Identity record={record} />
     <section className="trace-section"><h3>请求</h3><dl className="metric-grid"><div><dt>提供方</dt><dd>{record.request.provider}</dd></div><div><dt>模型</dt><dd>{record.request.model}</dd></div><div><dt>状态</dt><dd><StatusPill status={record.status} /></dd></div><div><dt>原因</dt><dd>{record.reason ?? "未知"}</dd></div></dl></section>
@@ -93,7 +84,7 @@ function ModelDetail({ record }: { record: ModelTraceRecord }) {
     <JsonPanel title="实际发送消息" value={record.request.messages} />
     <JsonPanel title="实际发送工具" value={record.request.tools} />
     <section className="trace-section"><h3>输出测量</h3><dl className="metric-grid"><div><dt>首个已提交内容边界</dt><dd>{metric(record.timings?.first_content_ms ?? null, " ms")}</dd></div><div><dt>请求耗时</dt><dd>{metric(record.timings?.duration_ms ?? null, " ms")}</dd></div><div><dt>停止原因</dt><dd>{record.stopReason ?? "未知"}</dd></div><div><dt>增量片段</dt><dd>{record.deltas.length}</dd></div></dl></section>
-    <JsonPanel title="组装输出" value={record.output} empty="待定" />
+    <JsonPanel title="模型输出" value={visibleOutput} empty="待定" />
     <details className="trace-fold"><summary>已提交流式片段 · {record.deltas.length}</summary><pre>{text(streamed)}</pre></details>
     <section className="trace-section"><h3>提供方用量</h3><dl className="metric-grid"><div><dt>输入词元</dt><dd>{metric(record.usage?.input_tokens ?? null)}</dd></div><div><dt>输出词元</dt><dd>{metric(record.usage?.output_tokens ?? null)}</dd></div><div><dt>词元总计</dt><dd>{metric(record.usage?.total_tokens ?? null)}</dd></div><div><dt>缓存读取</dt><dd>{metric(record.usage?.cache_read_tokens ?? null)}</dd></div><div><dt>缓存写入</dt><dd>{metric(record.usage?.cache_write_tokens ?? null)}</dd></div></dl></section>
     <JsonPanel title="错误" value={record.error} empty="未记录错误" />
@@ -134,6 +125,7 @@ function UserDetail({ item, closeRef, onClose }: { item: UserTraceItem } & Detai
 function SystemDetail({ item, closeRef, onClose }: { item: SystemTraceItem } & DetailControlProps) {
   return <div className="trace-detail"><DetailHeader eyebrow="SYSTEM" title="Initial System Prompt" trailing={<span className="trace-saved">REQUEST CONTEXT</span>} closeRef={closeRef} onClose={onClose} />
     <section className="trace-section"><h3>初始系统 Prompt</h3>{item.content.length ? <pre>{item.content.join("\n\n")}</pre> : <p className="unknown">此请求未提供初始系统 Prompt。</p>}</section>
+    <JsonPanel title="Tools" value={item.tools} empty="此请求未提供工具。" />
   </div>;
 }
 

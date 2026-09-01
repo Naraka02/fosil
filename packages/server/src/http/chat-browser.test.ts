@@ -13,8 +13,8 @@ import { SqliteWorkerStore } from "../storage/store.js";
 const workerUrl = new URL("../../dist/storage/storage-worker.js", import.meta.url);
 const webRoot = fileURLToPath(new URL("../../../web/dist/", import.meta.url));
 const usage = { input_tokens: null, output_tokens: null, total_tokens: null, cache_read_tokens: null, cache_write_tokens: null };
-const finish = (text: string, tool_calls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = []) => ({
-  type: "finish", output: { text, reasoning: null, tool_calls }, usage, stop_reason: tool_calls.length ? "tool_calls" : "stop"
+const finish = (text: string, tool_calls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = [], reasoning: string | null = null) => ({
+  type: "finish", output: { text, reasoning, tool_calls }, usage, stop_reason: tool_calls.length ? "tool_calls" : "stop"
 });
 const gate = () => { let resolve!: () => void; const promise = new Promise<void>((done) => { resolve = done; }); return { promise, resolve }; };
 const promptOf = (request: ModelRequestContext) => {
@@ -122,6 +122,17 @@ describe("product Chat controls in a real browser", () => {
     await page.getByRole("button", { name: "发送" }).click();
     await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(2);
     await page.getByText("Saved reply.").waitFor();
+    await page.getByLabel("消息").fill("Second saved follow-up");
+    await page.getByRole("button", { name: "发送" }).click();
+    await page.locator(".assistant-message").filter({ hasText: "Saved reply." }).last().waitFor();
+    await expect.poll(async () => (await page.locator(".composer-metrics").innerText()).replace(/\s+/gu, " ")).toMatch(/2 轮 2 步/u);
+    await page.locator(".session").filter({ hasText: "First saved session" }).click();
+    const switchingMetrics = page.locator(".composer-metrics");
+    expect((await switchingMetrics.count()) ? (await switchingMetrics.innerText()).replace(/\s+/gu, " ") : "").not.toMatch(/2 轮 2 步/u);
+    await page.locator(".user-message").filter({ hasText: "First saved session" }).waitFor();
+    await expect.poll(async () => (await switchingMetrics.innerText()).replace(/\s+/gu, " ")).toMatch(/1 轮 1 步/u);
+    await page.locator(".session").filter({ hasText: "Second saved session" }).click();
+    await expect.poll(async () => (await switchingMetrics.innerText()).replace(/\s+/gu, " ")).toMatch(/2 轮 2 步/u);
     await page.locator(".session-row").filter({ has: page.locator(".session.active") }).getByRole("button", { name: /删除会话：/u }).click();
     await page.getByRole("heading", { name: "删除会话记录" }).waitFor();
     expect(await page.getByText("本地工作区目录和源文件不会被删除。").count()).toBe(1);
@@ -253,7 +264,7 @@ describe("product Chat controls in a real browser", () => {
     await page.getByText("The denied write did not run.").waitFor();
     await page.locator("details.tool-row").filter({ hasText: "denied" }).waitFor();
     const secondMetrics = await page.locator(".composer-metrics").innerText();
-    expect(secondMetrics).toMatch(/2\s*轮\s*4\s*步/u); expect(secondMetrics.replace(/\s+/gu, " ")).toContain("输入 400 tok 输出 80 tok");
+    expect(secondMetrics).toMatch(/2\s*轮\s*4\s*步/u); expect(secondMetrics.replace(/\s+/gu, " ")).toContain("输入 400 tok 输出 80 tok"); expect(secondMetrics).not.toContain("工具调用 —");
     await expect(readFile(join(root, "denied-marker.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(calls).toBe(4);
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -274,6 +285,8 @@ describe("product Chat controls in a real browser", () => {
     expect(calls).toBe(5);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
+    const cancelledMetrics = await page.locator(".composer-metrics").innerText();
+    expect(cancelledMetrics.replace(/\s+/gu, " ")).toContain("输入 400 tok 输出 80 tok"); expect(cancelledMetrics).not.toContain("LLM 调用 —");
     expect(calls).toBe(5); expect(posts).toBe(7);
 
     await page.getByRole("tab", { name: "轨迹" }).click();
@@ -285,6 +298,13 @@ describe("product Chat controls in a real browser", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
+    const metricsGeometry = await page.evaluate(() => {
+      const box = document.querySelector<HTMLElement>(".composer-box")!.getBoundingClientRect();
+      const metrics = document.querySelector<HTMLElement>(".composer-metrics")!;
+      const rect = metrics.getBoundingClientRect();
+      return { inside: rect.left >= box.left && rect.right <= box.right && Math.abs(rect.bottom - box.bottom) <= 1, visible: rect.top >= 0 && rect.bottom <= innerHeight, overflow: metrics.scrollWidth > metrics.clientWidth };
+    });
+    expect(metricsGeometry).toEqual({ inside: true, visible: true, overflow: false });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     expect(external).toEqual([]); expect(posts).toBe(7);
   }, 30_000);
@@ -300,7 +320,7 @@ describe("product Chat controls in a real browser", () => {
     let calls = 0;
     const provider: ModelProvider = { async *stream(request) {
       calls++;
-      if (!hasToolResult(request)) yield finish("Requesting managed edit.", [{ provider_call_id: "managed-edit", name: "edit_file", arguments: { path: "target.txt", expected_sha256: digest, replacement: after } }]);
+      if (!hasToolResult(request)) yield finish("Requesting managed edit.", [{ provider_call_id: "managed-edit", name: "edit_file", arguments: { path: "target.txt", expected_sha256: digest, replacement: after } }], "Inspect the target and preserve the expected preimage before editing.");
       else yield finish("Target updated.");
     } };
     const server = new ExecutionHttpServer({ store, webRoot, loop: { provider, providerId: "controlled-trace", model: "fixture", pollIntervalMs: 5, batchMs: 5 }, streamPollMs: 5 });
@@ -337,12 +357,16 @@ describe("product Chat controls in a real browser", () => {
     expect(markerHierarchy.turnWeight).toBeGreaterThan(markerHierarchy.requestWeight);
     expect(await page.locator('.trace-event[data-kind="user"]').innerText()).not.toContain("TURN");
     expect(await page.locator('.trace-event[data-kind="assistant"]').first().innerText()).not.toContain("REQUEST");
-    expect(await page.locator('.trace-event[data-kind="assistant"] .trace-event-preview').allInnerTexts()).toEqual(["Requesting managed edit.", "Target updated."]);
+    expect(await page.locator('.trace-event[data-kind="assistant"] .trace-event-preview').allInnerTexts()).toEqual(["Inspect the target and preserve the expected preimage before editing.", "Target updated."]);
+    expect(await page.locator('.trace-event[data-kind="assistant"]').first().innerText()).not.toContain("edit_file");
     expect(await page.locator('.trace-event[data-kind="assistant"]').allInnerTexts()).not.toContain("模型请求进行中");
+    const systemPreview = await page.locator('.trace-event[data-kind="system"] .trace-event-preview').innerText();
+    expect(systemPreview).toContain("Tools:"); expect(systemPreview).toContain("edit_file");
     const toolRowText = await page.locator('.trace-event[data-kind="tool"] .trace-tool-preview').innerText();
     expect(toolRowText).toContain("→"); expect(toolRowText).not.toContain("参数"); expect(toolRowText).not.toContain("结果");
     await page.locator('.trace-event[data-kind="system"]').click();
-    expect(await page.locator(".trace-inspector").innerText()).toContain("Initial System Prompt");
+    const systemDetail = await page.locator(".trace-inspector").innerText();
+    expect(systemDetail).toContain("Initial System Prompt"); expect(systemDetail).toContain("Tools"); expect(systemDetail).toContain("edit_file");
     const traceClose = page.getByRole("button", { name: "关闭轨迹详情" });
     expect(await traceClose.evaluate((element) => element === document.activeElement)).toBe(true);
     expect(await traceClose.evaluate((element) => element.closest("header") !== null)).toBe(true);
@@ -356,7 +380,8 @@ describe("product Chat controls in a real browser", () => {
     expect(await modelDetail.innerText()).toContain("Workspace instructions");
     expect(await modelDetail.locator(".trace-section").filter({ hasText: "实际发送消息" }).innerText())
       .toContain("Preserve the browser Trace context boundary");
-    expect(await modelDetail.locator(".trace-section").filter({ hasText: "组装输出" }).innerText()).toContain("Requesting managed edit.");
+    const modelOutput = await modelDetail.locator(".trace-section").filter({ hasText: "模型输出" }).innerText();
+    expect(modelOutput).toContain("Inspect the target and preserve the expected preimage before editing."); expect(modelOutput).not.toContain("managed-edit");
     expect(await modelDetail.locator(".trace-section").filter({ hasText: "提供方用量" }).innerText()).toContain("未知");
     const closeTop = Math.round((await traceClose.boundingBox())!.y);
     await modelDetail.evaluate((element) => { element.scrollTop = 600; });

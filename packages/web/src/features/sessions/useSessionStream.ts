@@ -7,12 +7,13 @@ export type Connection = "loading" | "live" | "reconnecting" | "offline";
 
 export function useSessionStream(sessionId: string | null) {
   const [events, setEvents] = useState<Event[]>([]);
+  const [eventsSessionId, setEventsSessionId] = useState<string | null>(null);
   const [connection, setConnection] = useState<Connection>("loading");
   const [streamError, setStreamError] = useState<string | null>(null);
   const eventsRef = useRef<Event[]>([]);
 
   useEffect(() => {
-    if (!sessionId) { eventsRef.current = []; setEvents([]); setConnection("offline"); return; }
+    if (!sessionId) { eventsRef.current = []; setEvents([]); setEventsSessionId(null); setConnection("offline"); return; }
     let disposed = false;
     let source: EventSource | undefined;
     let retry: number | undefined;
@@ -31,6 +32,7 @@ export function useSessionStream(sessionId: string | null) {
         if (disposed) return;
         eventsRef.current = history;
         setEvents(history);
+        setEventsSessionId(sessionId);
         source = new EventSource(`/api/sessions/${encodeURIComponent(sessionId)}/events?after=${history.at(-1)?.seq ?? 0}`);
         source.onopen = () => { if (!disposed) { setConnection("live"); setStreamError(null); } };
         source.addEventListener("execution", (incoming) => {
@@ -63,5 +65,5 @@ export function useSessionStream(sessionId: string | null) {
     };
   }, [sessionId]);
 
-  return { events, connection, streamError, clearStreamError: () => setStreamError(null) };
+  return { events: eventsSessionId === sessionId ? events : [], connection, streamError, clearStreamError: () => setStreamError(null) };
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eventSchema, type Event } from "@fosil/contracts";
-import { payloadFlags, projectTrace, projectTraceMessages, traceRecordHasError, traceTimelineItemHasError } from "./trace-model.js";
+import { payloadFlags, projectTrace, projectTraceMessages, traceAssistantContent, traceRecordHasError, traceTimelineItemHasError } from "./trace-model.js";
 
 const at = (second: number) => `2026-08-29T00:00:${String(second).padStart(2, "0")}.000Z`;
 const event = (seq: number, type: Event["type"], data: unknown, second = seq): Event => eventSchema.parse({ schema_version: 1, session_id: "session", seq, recorded_at: at(second), type, data });
@@ -21,8 +21,8 @@ function history(): Event[] {
     event(3, "user.message", { run_id: "run", command_id: "submit", content: "Edit", origin: "user" }),
     event(4, "step.started", { run_id: "run", step: 1 }),
     event(5, "model.request.started", { ...correlation, request, context_composition: contextComposition, origin: "runner" }),
-    event(6, "model.response.delta", { ...correlation, delta_index: 1, delta: { kind: "text", text: "final" } }),
-    event(7, "model.request.finished", { ...correlation, status: "succeeded", reason: "completed", output: { text: "final", reasoning: null, tool_calls: [{ provider_call_id: "provider-call", name: "edit_file", arguments: { path: "target.txt" } }] }, stop_reason: "tool_calls", usage, timings: { first_content_ms: 0, duration_ms: null }, error: null, origin: "provider" }),
+    event(6, "model.response.delta", { ...correlation, delta_index: 1, delta: { kind: "reasoning", text: "Inspect the target before editing." } }),
+    event(7, "model.request.finished", { ...correlation, status: "succeeded", reason: "completed", output: { text: "", reasoning: "Inspect the target before editing.", tool_calls: [{ provider_call_id: "provider-call", name: "edit_file", arguments: { path: "target.txt" } }] }, stop_reason: "tool_calls", usage, timings: { first_content_ms: 0, duration_ms: null }, error: null, origin: "provider" }),
     event(8, "tool.call.created", { ...correlation, call_id: "call", provider_call_id: "provider-call", tool_name: "edit_file", arguments: { path: "target.txt", content: "after" }, cwd: "/tmp/project", requires_approval: true, approval_id: "approval", origin: "provider" }),
     event(9, "approval.requested", { ...correlation, call_id: "call", approval_id: "approval", tool_name: "edit_file", arguments: { path: "target.txt", content: "after" }, cwd: "/tmp/project", policy: "allow_once", expires_at: at(30), origin: "runner" }, 10),
     event(10, "approval.resolved", { ...correlation, call_id: "call", approval_id: "approval", status: "allowed", reason: "completed", origin: "user" }, 12),
@@ -42,14 +42,17 @@ describe("Trace projection", () => {
     expect(trace.timeline[0]).toMatchObject({ kind: "user", content: "Edit", commandId: "submit", approvalMode: "workspace_write", recordedAt: at(3) });
     const model = trace.records.find((record) => record.kind === "model")!;
     expect(model).toMatchObject({ id: "model:request", requestId: "request", status: "succeeded", request,
-      contextComposition, output: { text: "final" }, deltas: [{ kind: "text", text: "final" }], usage });
+      contextComposition, output: { text: "", reasoning: "Inspect the target before editing." }, deltas: [{ kind: "reasoning", text: "Inspect the target before editing." }], usage });
+    expect(traceAssistantContent(model)).toBe("Inspect the target before editing.");
+    expect(traceAssistantContent({ ...model, output: { text: "", reasoning: null, tool_calls: model.output!.tool_calls }, deltas: [] })).toBe("未记录调用工具前的思考");
+    expect(traceAssistantContent(model)).not.toContain("edit_file");
     const tool = trace.records.find((record) => record.kind === "tool")!;
     expect(tool).toMatchObject({ id: "tool:call", requestId: "request", callId: "call", status: "succeeded", evidence: { kind: "file_change", data: { diff: "--- a/target.txt\n+++ b/target.txt\n" } } });
     const approval = trace.records.find((record) => record.kind === "approval")!;
     expect(approval).toMatchObject({ id: "approval:approval", callId: "call", status: "allowed", waitMs: 2000, finishedAt: at(12) });
     expect(trace.runs[0]).toMatchObject({ approvalMode: "workspace_write", reason: "completed", finishedAt: at(14), steps: [{ reason: "completed", finishedAt: at(13) }] });
     expect(projectTraceMessages(trace).map((item) => item.kind)).toEqual(["system", "user", "context", "model", "tool"]);
-    expect(projectTraceMessages(trace)[0]).toMatchObject({ kind: "system", content: ["Inspect"], requestId: "request" });
+    expect(projectTraceMessages(trace)[0]).toMatchObject({ kind: "system", content: ["Inspect"], tools: request.tools, requestId: "request" });
     expect(projectTraceMessages(trace)[2]).toMatchObject({ kind: "context", content: { summary: "Earlier work is complete." }, requestId: "request" });
     expect(projectTrace(history())).toEqual(trace);
   });

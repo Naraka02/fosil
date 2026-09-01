@@ -26,7 +26,7 @@ describe("Chat event projection", () => {
   it("uses final model output instead of duplicating deltas and exposes only unresolved approvals", () => {
     const pending = projectChat(history());
     expect(pending.runs[0]).toMatchObject({ approvalMode: "manual", userContent: "Change it", status: "waiting_for_approval", assistants: [{ text: "final", status: "succeeded" }], tools: [{ status: "waiting_for_approval" }] });
-    expect(summarizeChatRun(pending.runs[0]!)).toMatchObject({ steps: 1, modelCalls: 1, toolCalls: 1, llmDurationMs: 2, toolDurationMs: null, averageFirstTokenMs: 1, cacheHitRate: .4, inputTokens: 100, outputTokens: 20 });
+    expect(summarizeChatRun(pending.runs[0]!)).toMatchObject({ steps: 1, modelCalls: 1, toolCalls: 1, llmDurationMs: 2, toolDurationMs: 0, averageFirstTokenMs: 1, cacheHitRate: .4, inputTokens: 100, outputTokens: 20 });
     expect(pending.pendingApprovals).toHaveLength(1);
     const settled = projectChat([...history(),
       event(10, "approval.resolved", { ...base, call_id: "call", approval_id: "approval", status: "allowed", reason: "completed", origin: "user" }),
@@ -55,6 +55,8 @@ describe("Chat event projection", () => {
     expect(summarizeChatRun(projected.runs[0]!)).toEqual({ steps: 2, modelCalls: 2, toolCalls: 1, llmDurationMs: 4, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 200, outputTokens: 40 });
     const secondRun = { ...projected.runs[0]!, runId: "run-2", steps: [1], assistants: [{ ...projected.runs[0]!.assistants[0]!, runId: "run-2" }], tools: [], activities: [] };
     expect(summarizeChatRuns([projected.runs[0]!, secondRun])).toEqual({ steps: 3, modelCalls: 3, toolCalls: 1, llmDurationMs: 6, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 300, outputTokens: 60 });
+    const cancelledRun = { ...secondRun, runId: "run-3", assistants: [{ ...secondRun.assistants[0]!, runId: "run-3", status: "cancelled" as const, timings: null, usage: null }], tools: [{ ...projected.runs[0]!.tools[0]!, runId: "run-3", status: "denied" as const, timings: null }], activities: [] };
+    expect(summarizeChatRuns([projected.runs[0]!, secondRun, cancelledRun])).toEqual({ steps: 4, modelCalls: 4, toolCalls: 2, llmDurationMs: 6, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 300, outputTokens: 60 });
   });
 
   it("deduplicates an identical delivery and rejects gaps, conflicts, and cross-session events", () => {

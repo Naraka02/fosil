@@ -246,9 +246,8 @@ svg { display: block; }
 .permission-menu > footer { border-top: 1px solid #eceef1; color: #9299a2; background: #fafbfc; padding: 8px 15px 9px; font-size: .55rem; }
 @keyframes permission-menu-in { from { opacity: 0; transform: translateY(6px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
 .composer-hint { margin-left: auto; color: #8d949e; }
-.composer-metrics { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 0; border-top: 1px solid #edf0f2; background: #fafbfc; color: #7b828c; padding: 7px 16px 8px; font-size: .58rem; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.composer-metrics { display: grid; grid-template-columns: repeat(5,max-content); align-items: center; gap: 6px 18px; min-height: 31px; border-top: 1px solid #edf0f2; border-radius: 0 0 26px 26px; background: #fafbfc; color: #7b828c; padding: 7px 16px 8px; overflow: hidden; font-size: .58rem; line-height: 1.35; font-variant-numeric: tabular-nums; }
 .composer-metrics span { display: inline-flex; align-items: baseline; white-space: nowrap; }
-.composer-metrics span + span::before { content: ""; width: 1px; height: 9px; margin: 0 9px; background: #d7dbe0; }
 .composer-metrics b { margin: 0 2px; color: #343940; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
 .send-button { display: grid; width: 43px; height: 43px; flex: none; place-items: center; border: 0; border-radius: 50%; background: #9fbcfa; color: #fff; padding: 0; }
 .send-button:hover:not(:disabled) { border: 0; background: var(--accent); }
@@ -492,8 +491,8 @@ svg { display: block; }
   .fresh-session .composer { top: 48%; width: calc(100% - 20px); transform: translate(-50%,8px); }
   .fresh-session .composer textarea { min-height: 88px; font-size: .88rem; }
   .trace-layout { display: block; min-height: 0; }
-  .composer-metrics { gap: 4px 0; padding: 6px 12px 7px; }
-  .composer-metrics span + span::before { margin: 0 6px; }
+  .composer-metrics { grid-template-columns: repeat(2,max-content); gap: 4px 12px; border-radius: 0 0 19px 19px; padding: 6px 12px 7px; }
+  .composer-metrics span:last-child { grid-column: 1 / -1; }
   .trace-event { grid-template-columns: 76px minmax(0,1fr); min-height: 40px; }
   .trace-row-marker { left: 76px; font-size: .42rem; }
   .trace-turn-marker { font-size: .45rem; }

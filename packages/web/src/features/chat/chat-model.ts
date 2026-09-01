@@ -74,30 +74,36 @@ export interface ChatProjection {
 }
 
 const completeNumbers = (values: readonly (number | null | undefined)[]): values is number[] => values.length > 0 && values.every((value) => typeof value === "number");
+const measuredNumbers = (values: readonly (number | null | undefined)[]) => values.filter((value): value is number => typeof value === "number");
 const sum = (values: readonly number[]) => values.reduce((total, value) => total + value, 0);
 
-/** Aggregates only complete persisted measurements; a partially unknown total remains unknown. */
+/** Aggregates persisted Session measurements without letting non-measured operations erase known evidence. */
 export function summarizeChatRuns(runs: readonly ChatRun[]): ChatRunMetrics {
   const assistants = runs.flatMap((run) => run.assistants);
   const tools = runs.flatMap((run) => run.tools);
-  const llmDurations = assistants.map((turn) => turn.timings?.duration_ms);
-  const firstTokens = assistants.map((turn) => turn.timings?.first_content_ms);
-  const toolDurations = tools.map((tool) => tool.timings?.duration_ms);
-  const inputTokens = assistants.map((turn) => turn.usage?.input_tokens);
-  const outputTokens = assistants.map((turn) => turn.usage?.output_tokens);
-  const cacheReadTokens = assistants.map((turn) => turn.usage?.cache_read_tokens);
-  const llmDurationMs = completeNumbers(llmDurations) ? sum(llmDurations) : null;
-  const averageFirstTokenMs = completeNumbers(firstTokens) ? sum(firstTokens) / firstTokens.length : null;
+  const settledAssistants = assistants.filter((turn) => turn.status !== "running");
+  const succeededAssistants = settledAssistants.filter((turn) => turn.status === "succeeded");
+  const llmDurations = measuredNumbers(settledAssistants.map((turn) => turn.timings?.duration_ms));
+  const firstTokens = measuredNumbers(settledAssistants.map((turn) => turn.timings?.first_content_ms));
+  const toolDurations = measuredNumbers(tools.map((tool) => tool.timings?.duration_ms));
+  const inputTokens = succeededAssistants.map((turn) => turn.usage?.input_tokens);
+  const outputTokens = succeededAssistants.map((turn) => turn.usage?.output_tokens);
+  const cacheReadTokens = succeededAssistants.map((turn) => turn.usage?.cache_read_tokens);
+  const throughputDurations = succeededAssistants.map((turn) => turn.timings?.duration_ms);
+  const throughputFirstTokens = succeededAssistants.map((turn) => turn.timings?.first_content_ms);
+  const llmDurationMs = llmDurations.length ? sum(llmDurations) : null;
+  const averageFirstTokenMs = firstTokens.length ? sum(firstTokens) / firstTokens.length : null;
   const totalInputTokens = completeNumbers(inputTokens) ? sum(inputTokens) : null;
   const totalOutputTokens = completeNumbers(outputTokens) ? sum(outputTokens) : null;
   const totalCacheReadTokens = completeNumbers(cacheReadTokens) ? sum(cacheReadTokens) : null;
-  const generationMs = llmDurationMs !== null && completeNumbers(firstTokens) ? llmDurationMs - sum(firstTokens) : null;
+  const generationMs = completeNumbers(throughputDurations) && completeNumbers(throughputFirstTokens)
+    ? sum(throughputDurations) - sum(throughputFirstTokens) : null;
   return {
     steps: sum(runs.map((run) => run.steps.length)),
     modelCalls: assistants.length,
     toolCalls: tools.length,
     llmDurationMs,
-    toolDurationMs: tools.length === 0 ? 0 : completeNumbers(toolDurations) ? sum(toolDurations) : null,
+    toolDurationMs: sum(toolDurations),
     averageFirstTokenMs,
     tokensPerSecond: totalOutputTokens !== null && generationMs !== null && generationMs > 0 ? totalOutputTokens / (generationMs / 1_000) : null,
     cacheHitRate: totalInputTokens !== null && totalInputTokens > 0 && totalCacheReadTokens !== null ? totalCacheReadTokens / totalInputTokens : null,

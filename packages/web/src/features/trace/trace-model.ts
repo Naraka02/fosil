@@ -93,6 +93,7 @@ export interface SystemTraceItem {
   runId: string;
   requestId: string;
   content: string[];
+  tools: ModelRequestContext["tools"];
   startedSeq: number;
   recordedAt: string;
 }
@@ -169,6 +170,19 @@ export function traceTimelineItemHasError(item: TraceTimelineItem): boolean {
   return item.kind !== "user" && traceRecordHasError(item);
 }
 
+const compactTraceText = (value: string) => value.replace(/\s+/gu, " ").trim();
+
+/** Select assistant ledger content without exposing provider tool-call blocks. */
+export function traceAssistantContent(item: ModelTraceRecord): string {
+  const reasoning = compactTraceText(item.output?.reasoning ?? "")
+    || compactTraceText(item.deltas.filter((delta) => delta.kind === "reasoning").map((delta) => delta.text ?? "").join(""));
+  const finalText = compactTraceText(item.output?.text ?? "");
+  const streamedText = compactTraceText(item.deltas.filter((delta) => delta.kind === "text").map((delta) => delta.text ?? "").join(""));
+  const requestsTool = !!item.output?.tool_calls.length || item.deltas.some((delta) => delta.kind === "tool_call");
+  if (requestsTool) return reasoning || finalText || streamedText || "未记录调用工具前的思考";
+  return finalText || streamedText || reasoning || (item.error?.message ? compactTraceText(item.error.message) : "—");
+}
+
 /** Build the message-oriented ledger without discarding the correlated operation evidence. */
 export function projectTraceMessages(trace: TraceProjection): TraceMessageItem[] {
   const firstRequest = trace.timeline.find((item): item is ModelTraceRecord => item.kind === "model");
@@ -177,6 +191,7 @@ export function projectTraceMessages(trace: TraceProjection): TraceMessageItem[]
   const initialSystem: SystemTraceItem = {
     kind: "system", id: `system:${firstRequest.requestId}`, runId: firstRequest.runId,
     requestId: firstRequest.requestId, content: [...firstRequest.request.system_instructions],
+    tools: [...firstRequest.request.tools],
     startedSeq: firstRequest.startedSeq, recordedAt: firstRequest.recordedAt
   };
   const seenContexts = new Set<string>();
