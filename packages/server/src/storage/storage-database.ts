@@ -30,7 +30,7 @@ const schema = `
 const payloadMarker = "__fosil_event_payload_v1";
 const reserveEligible = new Set<Event["type"]>([
   "run.cancel_requested", "approval.resolved", "model.request.finished", "context.compaction.succeeded", "context.compaction.failed",
-  "tool.finished", "step.finished", "run.finished"
+  "tool.finished", "step.finished", "run.finished", "workspace.blocker.resolved"
 ]);
 
 function canonicalDatabasePath(path: string): string {
@@ -45,18 +45,13 @@ function canonicalDatabasePath(path: string): string {
   }
 }
 
-type SessionIndex = Omit<SessionSummary, "title">;
+type SessionIndex = Omit<SessionSummary, "title" | "workspace_blockers">;
 
 function sessionIndex(state: ExecutionState, updatedAt: string | undefined): SessionIndex | null {
   if (!state.workspaceRoot || !state.sessionId) return null;
   if (!updatedAt) throw new Error("Session history has no latest event timestamp");
   return { session_id: state.sessionId, workspace_root: state.workspaceRoot, last_seq: state.lastSeq,
     active_run_id: state.activeRunId, activity: state.activity, updated_at: updatedAt };
-}
-
-function summary(state: ExecutionState, events: readonly Event[]): SessionSummary | null {
-  const index = sessionIndex(state, events.at(-1)?.recorded_at);
-  return index ? { ...index, title: deriveSessionTitle(events) } : null;
 }
 
 type EventRow = { session_id: string; seq: number; schema_version: number; type: string; recorded_at: string; data_json: string | null };
@@ -82,6 +77,10 @@ function overlaps(a: string, b: string): boolean {
 /** This class is instantiated only inside the storage worker. */
 export class StorageDatabase {
   private recoveryReport: RecoveryReport = { recovered_sessions: [], blocked_workspaces: [] };
+  private readonly stateCache = new Map<string, ExecutionState>();
+  private readonly summaries = new Map<string, SessionSummary>();
+  private readonly payloadBytesCache = new Map<string, number>();
+  private readonly stateCacheLimit = 32;
   private constructor(private readonly db: Database.Database,
     private readonly retention: { normalSessionPayloadBytes: number; hardSessionPayloadBytes: number }) {}
 
@@ -131,10 +130,12 @@ export class StorageDatabase {
 
   read(sessionId: string): Event[] { return this.db.transaction(() => this.load(sessionId).events)(); }
 
+  readState(sessionId: string): ExecutionState { return this.db.transaction(() => this.state(sessionId))(); }
+
   getSession(sessionId: string): SessionSummary | null {
     return this.db.transaction(() => {
-      const loaded = this.load(sessionId);
-      return summary(loaded.state, loaded.events);
+      if (!this.summaries.has(sessionId)) this.state(sessionId);
+      return this.summaries.get(sessionId) ?? null;
     })();
   }
 
@@ -144,29 +145,37 @@ export class StorageDatabase {
       const rows = this.db.prepare("SELECT session_id FROM sessions WHERE session_id > ? ORDER BY session_id LIMIT ?")
         .all(request.after ?? "", request.limit + 1) as { session_id: string }[];
       const sessions = rows.slice(0, request.limit).map((row) => {
-        const loaded = this.load(row.session_id);
-        return summary(loaded.state, loaded.events);
+        if (!this.summaries.has(row.session_id)) this.state(row.session_id);
+        return this.summaries.get(row.session_id)!;
       });
       return sessionListSchema.parse({ sessions, next_after: rows.length > request.limit ? rows[request.limit - 1]!.session_id : null });
     })();
   }
 
   deleteSession(sessionId: string): DeletionResult {
-    return this.db.transaction(() => {
-      if (!this.db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(sessionId)) {
-        throw new StoreError("session_not_found", "Session does not exist");
-      }
-      return this.deleteSessions([sessionId]);
-    }).immediate();
+    try {
+      const result = this.db.transaction(() => {
+        if (!this.db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(sessionId)) {
+          throw new StoreError("session_not_found", "Session does not exist");
+        }
+        return this.deleteSessions([sessionId]);
+      }).immediate();
+      this.dropCached(sessionId);
+      return result;
+    } catch (error) { this.invalidateDerived(); throw error; }
   }
 
   deleteWorkspace(workspaceRoot: string): DeletionResult {
-    return this.db.transaction(() => {
-      const sessionIds = (this.db.prepare("SELECT session_id FROM sessions WHERE workspace_root = ? ORDER BY session_id")
-        .all(workspaceRoot) as Array<{ session_id: string }>).map((row) => row.session_id);
-      if (sessionIds.length === 0) throw new StoreError("workspace_not_found", "Workspace has no saved sessions");
-      return this.deleteSessions(sessionIds);
-    }).immediate();
+    try {
+      const result = this.db.transaction(() => {
+        const sessionIds = (this.db.prepare("SELECT session_id FROM sessions WHERE workspace_root = ? ORDER BY session_id")
+          .all(workspaceRoot) as Array<{ session_id: string }>).map((row) => row.session_id);
+        if (sessionIds.length === 0) throw new StoreError("workspace_not_found", "Workspace has no saved sessions");
+        return this.deleteSessions(sessionIds);
+      }).immediate();
+      for (const sessionId of result.deleted_session_ids) this.dropCached(sessionId);
+      return result;
+    } catch (error) { this.invalidateDerived(); throw error; }
   }
 
   readPage(raw: unknown): HistoryPage {
@@ -192,7 +201,8 @@ export class StorageDatabase {
 
   appendBatch(inputs: readonly EventInput[]): Event[] {
     if (!Array.isArray(inputs) || inputs.length === 0) throw new StoreError("invalid_batch", "An event batch must not be empty");
-    return this.db.transaction(() => this.appendWithinTransaction(inputs)).immediate();
+    try { return this.db.transaction(() => this.appendWithinTransaction(inputs)).immediate(); }
+    catch (error) { this.invalidateDerived(); throw error; }
   }
 
   execute(rawCommand: unknown, rawContentMetadata?: readonly ContentMetadata[]): CommandAck {
@@ -203,14 +213,14 @@ export class StorageDatabase {
     const fingerprint = createHash("sha256").update(JSON.stringify(command)).digest("hex");
     const scopeKind = command.type === "session.create" ? "store" : "session";
     const scopeId = command.type === "session.create" ? "" : command.session_id;
-    return this.db.transaction(() => {
+    try { return this.db.transaction(() => {
       const receipt = this.db.prepare("SELECT fingerprint, ack_json FROM command_receipts WHERE scope_kind = ? AND scope_id = ? AND command_id = ?")
         .get(scopeKind, scopeId, command.command_id) as { fingerprint: string; ack_json: string } | undefined;
       if (receipt) {
         if (receipt.fingerprint !== fingerprint) throw new StoreError("command_conflict", "Command identity was already used with a different operation or payload");
         try {
           const ack = commandAckSchema.parse(JSON.parse(receipt.ack_json));
-          const state = this.load(ack.session_id).state;
+          const state = this.state(ack.session_id);
           if (ack.command_id !== command.command_id || (scopeKind === "session" && ack.session_id !== scopeId)
             || ack.last_seq > state.lastSeq || (ack.run_id !== null && !state.runs.has(ack.run_id))) {
             throw new Error("Command receipt disagrees with committed history");
@@ -230,7 +240,7 @@ export class StorageDatabase {
         if (!statSync(workspace).isDirectory()) throw new StoreError("invalid_workspace", "Workspace must be an existing directory");
         inputs = [{ ...envelope, type: "session.created", data: { workspace_root: workspace, created_by: "user" } }];
       } else {
-        const state = this.load(session_id).state;
+        const state = this.state(session_id);
         if (!state.workspaceRoot) throw new StoreError("session_not_found", "Session does not exist");
         if (command.type === "run.submit") {
           if (state.activeRunId !== null) throw new StoreError("session_busy", "Session already has an active run");
@@ -240,6 +250,23 @@ export class StorageDatabase {
             { ...envelope, type: "user.message", data: { run_id: runId, command_id: command.command_id, content: command.content, origin: "user" },
               ...(contentMetadata?.length ? { content_metadata: contentMetadata } : {}) }
           ];
+        } else if (command.type === "workspace.blocker.resolve") {
+          runId = command.run_id;
+          if (state.activeRunId !== null || state.activity !== "idle") {
+            throw new StoreError("session_busy", "Workspace blockers can be resolved only while the session is idle");
+          }
+          if (command.workspace_root !== state.workspaceRoot) {
+            throw new StoreError("workspace_mismatch", "Resolution must confirm the session's exact workspace root");
+          }
+          if (!workspaceBlockers(state).some((blocker) => blocker.run_id === command.run_id
+            && blocker.call_id === command.call_id && blocker.reason === command.reason)) {
+            throw new StoreError("blocker_not_found", "The identified workspace blocker is not unresolved");
+          }
+          inputs = [{ ...envelope, type: "workspace.blocker.resolved", data: {
+            run_id: command.run_id, command_id: command.command_id, call_id: command.call_id,
+            reason: command.reason, workspace_root: command.workspace_root,
+            acknowledged: command.acknowledged, note: command.note, origin: "user"
+          } }];
         } else {
           runId = command.run_id;
           const run = state.runs.get(runId);
@@ -267,7 +294,8 @@ export class StorageDatabase {
       this.db.prepare("INSERT INTO command_receipts (scope_kind, scope_id, command_id, fingerprint, ack_json) VALUES (?, ?, ?, ?, ?)")
         .run(scopeKind, scopeId, command.command_id, fingerprint, JSON.stringify(ack));
       return ack;
-    }).immediate();
+    }).immediate(); }
+    catch (error) { this.invalidateDerived(); throw error; }
   }
 
   private sessionIds(): string[] {
@@ -280,13 +308,13 @@ export class StorageDatabase {
       const report: RecoveryReport = { recovered_sessions: [], blocked_workspaces: [] };
       const recordedAt = new Date().toISOString();
       for (const sessionId of this.sessionIds()) {
-        const before = this.load(sessionId).state;
+        const before = this.state(sessionId);
         const inputs = planRecovery(before, recordedAt);
         if (inputs.length > 0) {
           const appended = this.appendWithinTransaction(inputs);
           report.recovered_sessions.push({ session_id: sessionId, run_id: before.activeRunId!, first_seq: appended[0]!.seq, last_seq: appended.at(-1)!.seq });
         }
-        const after = inputs.length > 0 ? this.load(sessionId).state : before;
+        const after = inputs.length > 0 ? this.state(sessionId) : before;
         for (const blocker of workspaceBlockers(after)) {
           report.blocked_workspaces.push({ ...blocker, session_id: sessionId, workspace_root: after.workspaceRoot! });
         }
@@ -297,8 +325,9 @@ export class StorageDatabase {
 
   private requireSafeWorkspace(root: string): void {
     for (const sessionId of this.sessionIds()) {
-      const state = this.load(sessionId).state;
-      if (state.workspaceRoot && overlaps(root, state.workspaceRoot) && workspaceBlockers(state).length > 0) {
+      if (!this.summaries.has(sessionId)) this.state(sessionId);
+      const saved = this.summaries.get(sessionId);
+      if (saved && overlaps(root, saved.workspace_root) && saved.workspace_blockers.length > 0) {
         throw new StoreError("workspace_blocked", "Workspace has an unknown tool outcome or cleanup failure; verified resolution is required");
       }
     }
@@ -307,7 +336,7 @@ export class StorageDatabase {
   private deleteSessions(sessionIds: readonly string[]): DeletionResult {
     const targets = new Set(sessionIds);
     for (const sessionId of sessionIds) {
-      const state = this.load(sessionId).state;
+      const state = this.state(sessionId);
       if (state.activeRunId !== null || state.activity !== "idle") {
         throw new StoreError("session_busy", "Active sessions cannot be deleted");
       }
@@ -344,11 +373,16 @@ export class StorageDatabase {
     const rows = this.db.prepare(`${eventColumns} WHERE session_id = ? ORDER BY seq`).all(sessionId) as EventRow[];
     try {
       const events = hydrate(rows);
-      const state = replay(events, sessionId);
+      const cached = this.stateCache.get(sessionId);
+      const state = cached && cached.lastSeq === events.length ? cached : replay(events, sessionId);
+      if (events.some((event, index) => event.seq !== index + 1) || state.lastSeq !== events.length) {
+        throw new Error("Session history contains a sequence gap");
+      }
       const index = this.db.prepare(`SELECT s.session_id, s.workspace_root, s.last_seq, s.active_run_id, s.activity,
         (SELECT recorded_at FROM events WHERE session_id = s.session_id ORDER BY seq DESC LIMIT 1) AS updated_at
         FROM sessions s WHERE s.session_id = ?`).get(sessionId) as SessionIndex | undefined;
       if (JSON.stringify(index ?? null) !== JSON.stringify(sessionIndex(state, events.at(-1)?.recorded_at))) throw new Error("Session index disagrees with event history");
+      this.cacheState(state, events.at(-1)?.recorded_at, deriveSessionTitle(events));
       return { events, state };
     } catch (error) {
       throw new StoreError("corrupt_history", error instanceof Error ? error.message : "Invalid stored history");
@@ -361,21 +395,26 @@ export class StorageDatabase {
     const events: Event[] = [];
     for (const raw of inputs) {
       const input = parseEventInput(raw);
-      const previous = states.get(input.session_id) ?? this.load(input.session_id).state;
+      const previous = states.get(input.session_id) ?? this.state(input.session_id);
       if (previous.workspaceRoot !== null && ["run.started", "step.started", "model.request.started", "tool.call.created", "approval.requested", "tool.started"].includes(input.type)) {
         this.requireSafeWorkspace(previous.workspaceRoot);
       }
-      const event = parseEvent({ ...input, seq: previous.lastSeq + 1 });
+      const candidate = parseEvent({ ...input, seq: previous.lastSeq + 1 });
+      const encodedPayload = JSON.stringify({ [payloadMarker]: 1, data: candidate.data,
+        content_metadata: candidate.content_metadata ?? [] });
+      const encoded = JSON.parse(encodedPayload) as { data: unknown; content_metadata: unknown[] };
+      // Reduce the exact JSON value that will be durable (for example, JSON normalizes -0 to 0).
+      const event = parseEvent({ ...candidate, data: encoded.data,
+        ...(encoded.content_metadata.length ? { content_metadata: encoded.content_metadata } : {}) });
       const state = applyEvent(previous, event);
       const row = sessionIndex(state, event.recorded_at)!;
       this.db.prepare(`INSERT INTO sessions (session_id, workspace_root, last_seq, active_run_id, activity) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET last_seq = excluded.last_seq, active_run_id = excluded.active_run_id, activity = excluded.activity`)
         .run(row.session_id, row.workspace_root, row.last_seq, row.active_run_id, row.activity);
       const payloadId = randomUUID();
-      const encodedPayload = JSON.stringify({ [payloadMarker]: 1, data: event.data,
-        content_metadata: event.content_metadata ?? [] });
-      const currentBytes = payloadBytes.get(event.session_id) ?? (this.db.prepare(`SELECT COALESCE(SUM(length(CAST(p.data_json AS BLOB))), 0) AS bytes
-        FROM events e JOIN payloads p USING(payload_id) WHERE e.session_id = ?`).get(event.session_id) as { bytes: number }).bytes;
+      const currentBytes = payloadBytes.get(event.session_id) ?? this.payloadBytesCache.get(event.session_id)
+        ?? (this.db.prepare(`SELECT COALESCE(SUM(length(CAST(p.data_json AS BLOB))), 0) AS bytes
+          FROM events e JOIN payloads p USING(payload_id) WHERE e.session_id = ?`).get(event.session_id) as { bytes: number }).bytes;
       const nextBytes = currentBytes + Buffer.byteLength(encodedPayload, "utf8");
       if (nextBytes > this.retention.hardSessionPayloadBytes
         || (!reserveEligible.has(event.type) && nextBytes > this.retention.normalSessionPayloadBytes)) {
@@ -383,12 +422,52 @@ export class StorageDatabase {
           ? "Session terminal payload reserve is exhausted" : "Session normal payload budget is exhausted");
       }
       payloadBytes.set(event.session_id, nextBytes);
+      this.payloadBytesCache.set(event.session_id, nextBytes);
       this.db.prepare("INSERT INTO payloads (payload_id, data_json) VALUES (?, ?)").run(payloadId, encodedPayload);
       this.db.prepare("INSERT INTO events (session_id, seq, schema_version, type, recorded_at, payload_id) VALUES (?, ?, ?, ?, ?, ?)")
         .run(event.session_id, event.seq, event.schema_version, event.type, event.recorded_at, payloadId);
       states.set(event.session_id, state);
+      const firstUserMessage = event.type === "user.message"
+        && ![...previous.runs.values()].some((run) => run.userMessage !== null);
+      this.cacheState(state, event.recorded_at,
+        firstUserMessage ? deriveSessionTitle([event]) : this.summaries.get(event.session_id)?.title ?? "新会话");
       events.push(event);
     }
     return events;
+  }
+
+  private state(sessionId: string): ExecutionState {
+    if (typeof sessionId !== "string" || sessionId.length === 0) throw new StoreError("invalid_session", "Session identity is required");
+    const cached = this.stateCache.get(sessionId);
+    if (cached) {
+      this.stateCache.delete(sessionId);
+      this.stateCache.set(sessionId, cached);
+      return cached;
+    }
+    return this.load(sessionId).state;
+  }
+
+  private cacheState(state: ExecutionState, updatedAt: string | undefined, title: string): void {
+    if (!state.sessionId || !state.workspaceRoot || !updatedAt) return;
+    this.stateCache.delete(state.sessionId);
+    this.stateCache.set(state.sessionId, state);
+    while (this.stateCache.size > this.stateCacheLimit) this.stateCache.delete(this.stateCache.keys().next().value!);
+    this.summaries.set(state.sessionId, {
+      session_id: state.sessionId, title, workspace_root: state.workspaceRoot, last_seq: state.lastSeq,
+      active_run_id: state.activeRunId, activity: state.activity, updated_at: updatedAt,
+      workspace_blockers: workspaceBlockers(state)
+    });
+  }
+
+  private dropCached(sessionId: string): void {
+    this.stateCache.delete(sessionId);
+    this.summaries.delete(sessionId);
+    this.payloadBytesCache.delete(sessionId);
+  }
+
+  private invalidateDerived(): void {
+    this.stateCache.clear();
+    this.summaries.clear();
+    this.payloadBytesCache.clear();
   }
 }

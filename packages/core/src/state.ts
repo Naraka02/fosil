@@ -104,6 +104,12 @@ export interface ExecutionState {
   readonly activeRunId: string | null;
   readonly runs: ReadonlyMap<string, RunState>;
   readonly compactions: ReadonlyMap<string, CompactionState>;
+  readonly resolvedWorkspaceBlockers: ReadonlySet<string>;
+}
+
+export function workspaceBlockerKey(runId: string, callId: string | null,
+  reason: "unknown_tool_outcome" | "cleanup_failed"): string {
+  return JSON.stringify([runId, callId, reason]);
 }
 
 export class EventReducerError extends Error {
@@ -114,5 +120,6 @@ export class EventReducerError extends Error {
 }
 
 export function initialState(sessionId: string | null = null): ExecutionState {
-  return { sessionId, workspaceRoot: null, lastSeq: 0, activity: "idle", activeRunId: null, runs: new Map(), compactions: new Map() };
+  return { sessionId, workspaceRoot: null, lastSeq: 0, activity: "idle", activeRunId: null, runs: new Map(), compactions: new Map(),
+    resolvedWorkspaceBlockers: new Set() };
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { parseEventInput, type ApprovalMode, type Event, type EventInput } from "@fosil/contracts";
-import { replay, type RunState, type ToolState } from "@fosil/core";
+import type { RunState, ToolState } from "@fosil/core";
 import { FileToolError, ToolCancelled } from "../tools/file-tools.js";
 import { workspaceShellSandboxAvailable } from "../tools/shell-tools.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
@@ -63,11 +63,12 @@ export class ToolService {
 
   private async advanceOnce(sessionId: string, runId: string, callId: string, signal?: AbortSignal): Promise<ToolAdvance> {
     this.checkService(signal);
-    const { state, run, events } = await this.load(sessionId, runId);
+    const { state, run } = await this.load(sessionId, runId);
     this.checkService(signal);
     const call = run.tools.get(callId);
     if (!call) throw new StoreError("missing_call", "Tool call does not exist in this run");
     if (!unsettled(call)) {
+      const events = await this.store.read(sessionId);
       const event = events.find((event): event is Finished => event.type === "tool.finished" && event.data.run_id === runId && event.data.call_id === callId);
       if (!event) throw new StoreError("missing_result", "Settled tool has no recorded result");
       return { status: "finished", event };
@@ -218,11 +219,10 @@ export class ToolService {
   }
 
   private async load(sessionId: string, runId: string) {
-    const events = await this.store.read(sessionId);
-    const state = replay(events);
+    const state = await this.store.readState(sessionId);
     const run: RunState | undefined = state.runs.get(runId);
     if (!run) throw new StoreError("missing_run", "Run does not exist in this session");
-    return { state, run, events };
+    return { state, run };
   }
 
   private input(sessionId: string, type: EventInput["type"], data: unknown): EventInput {

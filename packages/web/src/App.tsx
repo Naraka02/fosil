@@ -16,6 +16,7 @@ import "./app.css";
 
 type View = "chat" | "trace";
 type DeleteTarget = { kind: "session"; session: SessionSummary } | { kind: "workspace"; root: string; name: string; count: number };
+type WorkspaceBlocker = SessionSummary["workspace_blockers"][number];
 const collapsedKey = "fosil.sidebar-collapsed";
 const approvalModeKey = "fosil.approval-mode";
 const readApprovalMode = (): ApprovalMode => {
@@ -70,6 +71,10 @@ export function App() {
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [resolutionTarget, setResolutionTarget] = useState<WorkspaceBlocker | null>(null);
+  const [resolutionNote, setResolutionNote] = useState("");
+  const [resolvingBlocker, setResolvingBlocker] = useState(false);
+  const [resolutionError, setResolutionError] = useState<string | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readStorage(collapsedKey) === "true");
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>(readApprovalMode);
@@ -88,6 +93,7 @@ export function App() {
   const workspaceGroups = useMemo(() => groupSessionsByWorkspace(sessions), [sessions]);
   const catalogSelected = sessions.find((session) => session.session_id === selectedId) ?? null;
   const selected = draftWorkspace === null ? catalogSelected : null;
+  const workspaceBlocked = (selected?.workspace_blockers.length ?? 0) > 0;
   const sessionWorkspace = draftWorkspace ?? selected?.workspace_root ?? null;
   const visibleError = commandError ?? streamError ?? listError;
   const freshSession = draftWorkspace !== null || !selected || projection.runs.length === 0;
@@ -155,7 +161,7 @@ export function App() {
     if (target) beginDraft(target); else openWorkspacePicker("new");
   };
   const submit = async (event: FormEvent) => {
-    event.preventDefault(); if ((!selectedId && !draftWorkspace) || !message.trim() || projection.activeRunId || awaitingRun || creating || uncertain) return;
+    event.preventDefault(); if ((!selectedId && !draftWorkspace) || !message.trim() || projection.activeRunId || awaitingRun || creating || uncertain || workspaceBlocked) return;
     const content = message.trim(); setCommandError(null);
     let sessionId = selectedId;
     try {
@@ -181,6 +187,22 @@ export function App() {
     if (!selectedId || !projection.activeRunId || cancelling || uncertain) return; setCancelling(true); setCommandError(null);
     try { await sendCommand({ type: "run.cancel", command_id: commandId(), session_id: selectedId, run_id: projection.activeRunId }); await refreshSessions(); }
     catch (failure) { setCancelling(false); mutationFailed(failure); }
+  };
+  const resolveWorkspaceBlocker = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!selected || !resolutionTarget || !resolutionNote.trim() || resolvingBlocker || uncertain) return;
+    setResolvingBlocker(true); setResolutionError(null); setCommandError(null);
+    try {
+      await sendCommand({
+        type: "workspace.blocker.resolve", command_id: commandId(), session_id: selected.session_id,
+        run_id: resolutionTarget.run_id, call_id: resolutionTarget.call_id, reason: resolutionTarget.reason,
+        workspace_root: selected.workspace_root, acknowledged: true, note: resolutionNote.trim()
+      });
+      setResolutionTarget(null); setResolutionNote(""); await refreshSessions();
+    } catch (failure) {
+      setResolutionError(failure instanceof Error ? failure.message : "解除封锁失败");
+      mutationFailed(failure);
+    } finally { setResolvingBlocker(false); }
   };
   const toggleSidebar = () => setSidebarCollapsed((current) => { const next = !current; writeStorage(collapsedKey, String(next)); return next; });
   const saveApprovalMode = (mode: ApprovalMode) => { setApprovalMode(mode); writeStorage(approvalModeKey, mode); };
@@ -246,11 +268,11 @@ export function App() {
     <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => {
       if (event.key !== "Enter" || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
       event.preventDefault(); event.currentTarget.form?.requestSubmit();
-    }} placeholder={sessionWorkspace ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!sessionWorkspace || !!projection.activeRunId || !!awaitingRun || creating || uncertain} rows={2} />
+    }} placeholder={workspaceBlocked ? "请先核验并解除工作区安全封锁" : sessionWorkspace ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!sessionWorkspace || !!projection.activeRunId || !!awaitingRun || creating || uncertain || workspaceBlocked} rows={2} />
       <div className="composer-footer">{sessionWorkspace && freshSession ? <div className="workspace-switcher" ref={workspaceMenuRef}><button className="composer-context workspace-switch-trigger" type="button" aria-label={`切换新会话工作区，当前为 ${workspaceName(sessionWorkspace)}`} aria-haspopup="menu" aria-expanded={workspaceMenuOpen} onClick={() => setWorkspaceMenuOpen((current) => !current)}><FolderIcon /><span>{workspaceName(sessionWorkspace)}</span><ChevronIcon className={workspaceMenuOpen ? "open" : ""} /></button>{workspaceMenuOpen && <section className="workspace-switch-menu" role="menu" aria-label="切换新会话工作区"><header><strong>新会话工作区</strong><span>发送第一条消息时才会创建会话</span></header><div>{workspaceGroups.map((group) => <button key={group.root} type="button" role="menuitemradio" aria-checked={group.root === sessionWorkspace} disabled={group.root === sessionWorkspace || creating} onClick={() => switchDraftWorkspace(group.root)}><FolderIcon /><span><strong>{group.name}</strong><small>{group.root}</small></span>{group.root === sessionWorkspace && <CheckIcon />}</button>)}</div><footer><button type="button" onClick={() => openWorkspacePicker("switch")}><PlusIcon />选择其他本地目录</button></footer></section>}</div> : <span className="composer-context"><FolderIcon />{sessionWorkspace ? workspaceName(sessionWorkspace) : "尚未选择工作区"}</span>}<div className={`permission-picker permission-${effectiveApprovalMode}`} ref={permissionPickerRef}>
         <button className="permission-trigger" type="button" aria-label={`权限审批模式：${approvalModeLabel[effectiveApprovalMode]}`} aria-haspopup="menu" aria-expanded={permissionMenuOpen} title={approvalModeTitle[effectiveApprovalMode]} disabled={!!projection.activeRunId || !!awaitingRun || creating || uncertain} onClick={() => setPermissionMenuOpen((current) => !current)}><PermissionIcon /><span>{approvalModeLabel[effectiveApprovalMode]}</span><ChevronIcon className={permissionMenuOpen ? "open" : ""} /></button>
         {permissionMenuOpen && <section className="permission-menu" role="menu" aria-label="选择权限审批模式"><header><div><strong>权限审批模式</strong><span>用于下一次运行</span></div><kbd>ESC</kbd></header><div className="permission-options">{approvalModes.map((mode) => <button key={mode} type="button" role="menuitemradio" aria-checked={approvalMode === mode} className={approvalMode === mode ? "selected" : ""} onClick={() => chooseApprovalMode(mode)}><span className={`permission-option-icon permission-option-${mode}`}><PermissionIcon /></span><span className="permission-option-copy"><strong>{approvalModeLabel[mode]}{mode === "full_access" && <em>高风险</em>}</strong><small>{approvalModeTitle[mode]}</small></span>{approvalMode === mode && <CheckIcon className="permission-check" />}</button>)}</div><footer>所选模式会持久化到运行记录与 Trace</footer></section>}
-      </div><span className="composer-hint">{creating ? "正在创建会话" : projection.activeRunId ? "当前会话正在执行" : "Enter 发送 · Shift+Enter 换行"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!sessionWorkspace || !message.trim() || !!projection.activeRunId || !!awaitingRun || creating || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
+      </div><span className="composer-hint">{creating ? "正在创建会话" : workspaceBlocked ? "工作区安全封锁" : projection.activeRunId ? "当前会话正在执行" : "Enter 发送 · Shift+Enter 换行"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!sessionWorkspace || !message.trim() || !!projection.activeRunId || !!awaitingRun || creating || uncertain || workspaceBlocked}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
       {sessionMetrics && <div className="composer-metrics" aria-label={`当前 Session 共 ${latestRound} 轮、${sessionMetrics.steps} 步的累计运行统计`} title="所有指标均累计当前 Session 的全部轮次。速度按总输出 token 除以模型总生成阶段耗时计算；缓存命中按总缓存读取 token 除以总输入 token 计算。">
         <span><b>{latestRound}</b> 轮 <b>{sessionMetrics.steps}</b> 步</span>
         <span>LLM 调用 <b>{durationLabel(sessionMetrics.llmDurationMs)}</b> 工具调用 <b>{durationLabel(sessionMetrics.toolDurationMs)}</b></span>
@@ -294,6 +316,7 @@ export function App() {
         <div className="topbar-actions"><div className="view-switch" role="tablist" aria-label="会话视图"><button role="tab" aria-selected={view === "chat"} className={view === "chat" ? "selected" : ""} onClick={() => setView("chat")}>对话</button><button role="tab" aria-selected={view === "trace"} className={view === "trace" ? "selected" : ""} onClick={() => setView("trace")}>轨迹</button></div><span className={`connection connection-${connection}`}><span aria-hidden="true" />{connectionLabel[connection]}</span>{projection.activeRunId && <button className="cancel-button" onClick={cancel} disabled={cancelling || uncertain}>{cancelling ? "取消中" : "取消运行"}</button>}</div>
       </header>
       {visibleError && <div className="notice" role="alert"><span>{visibleError}</span>{uncertain && <button onClick={() => location.reload()}>立即刷新</button>}</div>}
+      {selected && selected.workspace_blockers.length > 0 && <div className="blocker-notice" role="alert"><div><strong>工作区已安全封锁</strong><span>检测到 {selected.workspace_blockers.length} 个结果不确定的工具或清理操作。确认外部状态前不会继续执行。</span></div><button type="button" onClick={() => { setResolutionTarget(selected.workspace_blockers[0]!); setResolutionNote(""); setResolutionError(null); }}>核验并解除</button></div>}
       {view === "chat" ? <div className="chat-view"><section className="conversation" ref={conversationRef} aria-live="polite" aria-label="对话">
         {draftWorkspace && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><div className="welcome-context"><FolderIcon /><strong>{workspaceName(draftWorkspace)}</strong><span /><small className="draft-state">发送后创建</small></div></div>}
         {!draftWorkspace && !selected && <div className="empty-state"><div className="welcome-title"><FossilMark className="empty-mark" /><h2>探索未至之境</h2><span>本地版</span></div><p>从左侧新建会话，选择一个工作区开始构建。</p></div>}
@@ -330,6 +353,8 @@ export function App() {
     </div></Dialog>}
 
     {deleteTarget && <Dialog title={deleteTarget.kind === "session" ? "删除会话记录" : "删除工作区记录"} onClose={() => { if (!deleting) setDeleteTarget(null); }} className="delete-dialog"><div className="dialog-body delete-confirm"><span className="delete-mark"><TrashIcon /></span><div><p className="eyebrow">不可撤销</p><h3>{deleteTarget.kind === "session" ? deleteTarget.session.title : deleteTarget.name}</h3><p>{deleteTarget.kind === "session" ? "将删除这个会话的全部消息、Trace、工具结果和命令回执。" : `将删除该工作区下的 ${deleteTarget.count} 个会话及其全部历史记录。`}</p><strong>本地工作区目录和源文件不会被删除。</strong>{deleteError && <p className="delete-error" role="alert">{deleteError}</p>}</div></div><footer className="dialog-actions delete-actions"><button className="secondary" type="button" onClick={() => setDeleteTarget(null)} disabled={deleting}>取消</button><button className="danger-button" type="button" onClick={() => void confirmDelete()} disabled={deleting || uncertain}>{deleting ? "正在删除" : deleteTarget.kind === "session" ? "删除会话" : "删除工作区记录"}</button></footer></Dialog>}
+
+    {resolutionTarget && selected && <Dialog title="核验工作区状态" onClose={() => { if (!resolvingBlocker) setResolutionTarget(null); }} className="resolution-dialog"><form onSubmit={resolveWorkspaceBlocker}><div className="dialog-body resolution-confirm"><p className="eyebrow">安全封锁</p><h3>{resolutionTarget.reason === "cleanup_failed" ? "清理结果失败" : "工具执行结果未知"}</h3><p>请先在 Fosil 之外检查工作区及相关进程。此操作只解除安全门，不会停止进程、撤销文件或证明清理完成。</p><dl><div><dt>工作区</dt><dd>{selected.workspace_root}</dd></div><div><dt>运行</dt><dd>{resolutionTarget.run_id}</dd></div>{resolutionTarget.call_id && <div><dt>工具调用</dt><dd>{resolutionTarget.call_id}</dd></div>}</dl><label htmlFor="resolution-note">核验记录</label><textarea id="resolution-note" value={resolutionNote} onChange={(event) => setResolutionNote(event.target.value)} maxLength={2000} rows={4} placeholder="说明检查了哪些进程、文件或外部影响，以及为何可以继续执行" required />{resolutionError && <p className="delete-error" role="alert">{resolutionError}</p>}</div><footer className="dialog-actions"><button className="secondary" type="button" onClick={() => setResolutionTarget(null)} disabled={resolvingBlocker}>取消</button><button className="danger-button" type="submit" disabled={resolvingBlocker || !resolutionNote.trim() || uncertain}>{resolvingBlocker ? "正在记录" : "确认已核验并解除"}</button></footer></form></Dialog>}
 
     {permissionWarningOpen && <Dialog title="启用 Full Access" onClose={() => setPermissionWarningOpen(false)} className="permission-dialog"><div className="dialog-body permission-warning"><div className="permission-warning-intro"><span className="permission-warning-mark">!</span><div><p className="eyebrow">高风险权限模式</p><h3>所有工具将不再逐次询问</h3><p>Full Access 会自动允许受支持工具，包括 Shell。它不是工作区沙箱。</p></div></div><ul><li><span />Shell 可读取或修改工作区外的文件</li><li><span />命令可启动进程并产生主机级影响</li><li><span />该选择会写入下一次运行记录</li></ul></div><footer className="dialog-actions permission-warning-actions"><small>仅影响之后提交的运行</small><button className="secondary" type="button" onClick={() => setPermissionWarningOpen(false)}>取消</button><button className="danger-button" type="button" onClick={() => { saveApprovalMode("full_access"); setPermissionWarningOpen(false); }}>启用 Full Access</button></footer></Dialog>}
   </div>;

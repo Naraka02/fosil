@@ -307,6 +307,12 @@ export const toolFinishedEventSchema = envelope("tool.finished", z.object({
 export const runCancelRequestedEventSchema = envelope("run.cancel_requested", z.object({
   ...runCorrelation, command_id: id, origin: z.literal("user")
 }).strict());
+export const workspaceBlockerReasonSchema = z.enum(["unknown_tool_outcome", "cleanup_failed"]);
+export const workspaceBlockerResolvedEventSchema = envelope("workspace.blocker.resolved", z.object({
+  ...runCorrelation, command_id: id, call_id: id.nullable(), reason: workspaceBlockerReasonSchema,
+  workspace_root: absolutePath, acknowledged: z.literal(true), note: z.string().trim().min(1).max(2_000),
+  origin: z.literal("user")
+}).strict());
 export const runFinishedEventSchema = envelope("run.finished", z.object({
   ...runCorrelation,
   status: runStatusSchema.extract(["completed", "failed", "cancelled", "interrupted"]),
@@ -320,7 +326,7 @@ export const eventSchema = z.discriminatedUnion("type", [
   contextCompactionStartedEventSchema, contextCompactionSucceededEventSchema, contextCompactionFailedEventSchema,
   toolCallCreatedEventSchema,
   approvalRequestedEventSchema, approvalResolvedEventSchema, toolStartedEventSchema,
-  toolFinishedEventSchema, runCancelRequestedEventSchema, runFinishedEventSchema
+  toolFinishedEventSchema, runCancelRequestedEventSchema, runFinishedEventSchema, workspaceBlockerResolvedEventSchema
 ]);
 export const eventInputSchema = z.discriminatedUnion("type", [
   sessionCreatedEventInputSchema, runStartedEventSchema.omit({ seq: true }), userMessageEventSchema.omit({ seq: true }),
@@ -331,7 +337,8 @@ export const eventInputSchema = z.discriminatedUnion("type", [
   contextCompactionFailedEventSchema.omit({ seq: true }), toolCallCreatedEventSchema.omit({ seq: true }),
   approvalRequestedEventSchema.omit({ seq: true }), approvalResolvedEventSchema.omit({ seq: true }),
   toolStartedEventSchema.omit({ seq: true }), toolFinishedEventSchema.omit({ seq: true }),
-  runCancelRequestedEventSchema.omit({ seq: true }), runFinishedEventSchema.omit({ seq: true })
+  runCancelRequestedEventSchema.omit({ seq: true }), runFinishedEventSchema.omit({ seq: true }),
+  workspaceBlockerResolvedEventSchema.omit({ seq: true })
 ]);
 
 export type SessionCreatedEvent = z.infer<typeof sessionCreatedEventSchema>;

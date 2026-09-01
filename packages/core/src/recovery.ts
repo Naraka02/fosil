@@ -1,6 +1,6 @@
 import { parseEventInput, type EventInput } from "@fosil/contracts";
 import { applyEvent } from "./reducer.js";
-import type { ExecutionState } from "./state.js";
+import { workspaceBlockerKey, type ExecutionState } from "./state.js";
 
 export interface WorkspaceBlocker {
   run_id: string;
@@ -13,11 +13,13 @@ export function workspaceBlockers(state: ExecutionState): WorkspaceBlocker[] {
   const blockers: WorkspaceBlocker[] = [];
   for (const run of state.runs.values()) {
     if (run.reason === "cleanup_failed" || run.blockedReason === "cleanup_failed") {
-      blockers.push({ run_id: run.runId, call_id: null, reason: "cleanup_failed" });
+      const blocker = { run_id: run.runId, call_id: null, reason: "cleanup_failed" } as const;
+      if (!state.resolvedWorkspaceBlockers.has(workspaceBlockerKey(blocker.run_id, blocker.call_id, blocker.reason))) blockers.push(blocker);
     }
     for (const call of run.tools.values()) {
       if (call.started && call.status === "interrupted") {
-        blockers.push({ run_id: run.runId, call_id: call.callId, reason: "unknown_tool_outcome" });
+        const blocker = { run_id: run.runId, call_id: call.callId, reason: "unknown_tool_outcome" } as const;
+        if (!state.resolvedWorkspaceBlockers.has(workspaceBlockerKey(blocker.run_id, blocker.call_id, blocker.reason))) blockers.push(blocker);
       }
     }
   }

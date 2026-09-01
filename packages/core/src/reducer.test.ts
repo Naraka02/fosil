@@ -155,6 +155,15 @@ describe("execution reducer", () => {
     const interrupted = recover(replay(events));
     expect(buildModelHistory(interrupted).at(-1)).toMatchObject({ role: "tool", content: { execution: "unknown", result: null, exit_code: null } });
     expect(workspaceBlockers(interrupted)).toEqual([{ run_id: "run-1", call_id: "call-1", reason: "unknown_tool_outcome" }]);
+    const resolved = applyEvent(interrupted, nextEvent(interrupted, "workspace.blocker.resolved", {
+      run_id: "run-1", command_id: "resolve-unknown", call_id: "call-1", reason: "unknown_tool_outcome",
+      workspace_root: "/tmp/fixture", acknowledged: true, note: "Inspected the workspace and confirmed the effect is settled.", origin: "user"
+    }));
+    expect(workspaceBlockers(resolved)).toEqual([]);
+    expect(() => applyEvent(resolved, nextEvent(resolved, "workspace.blocker.resolved", {
+      run_id: "run-1", command_id: "duplicate", call_id: "call-1", reason: "unknown_tool_outcome",
+      workspace_root: "/tmp/fixture", acknowledged: true, note: "Checked again.", origin: "user"
+    }))).toThrowError(EventReducerError);
     events.push(s.next("tool.finished", toolResult({ result: { saved: true }, exit_code: 0 })));
     const saved = recover(replay(events));
     expect(buildModelHistory(saved).at(-1)).toMatchObject({ role: "tool", content: { execution: "settled", provenance: "recorded", result: { saved: true }, exit_code: 0 } });

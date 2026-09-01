@@ -24,6 +24,7 @@ class HookStore extends SqliteWorkerStore {
   afterAppend: ((events: Event[]) => Promise<void>) | undefined;
   beforeRead: (() => void) | undefined;
   override async read(sessionId: string) { this.beforeRead?.(); return super.read(sessionId); }
+  override async readState(sessionId: string) { this.beforeRead?.(); return super.readState(sessionId); }
   override async appendBatch(events: readonly EventInput[]) {
     await this.beforeAppend?.(events);
     const saved = await super.appendBatch(events);

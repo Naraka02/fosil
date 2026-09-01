@@ -3,7 +3,7 @@ import {
   modelRequestContextSchema, parseEventInput,
   type Event, type EventInput, type EventReason, type ModelOutput, type ModelRequestContext
 } from "@fosil/contracts";
-import { buildModelRequest, replay, type ExecutionState, type RunState } from "@fosil/core";
+import { buildModelRequest, type ExecutionState, type RunState } from "@fosil/core";
 import { executeModelRequest, type ModelProvider, type ModelRequestOutcome } from "../providers/model-provider.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
 import { ToolService } from "./tool-service.js";
@@ -372,10 +372,10 @@ export class AgentLoopService {
   }
 
   private async compact(sessionId: string, runId: string,
-    loaded: { state: ExecutionState; run: RunState; events: Event[] }, fullRequest: ModelRequestContext,
+    loaded: { state: ExecutionState; run: RunState }, fullRequest: ModelRequestContext,
     trigger: "token_pressure" | "request_bytes" | "context_overflow", signal: AbortSignal): Promise<boolean> {
     if (!this.contextPolicy) return false;
-    const plan = buildCompactionPlan(loaded.state, loaded.events, fullRequest, this.contextPolicy);
+    const plan = buildCompactionPlan(loaded.state, await this.store.read(sessionId), fullRequest, this.contextPolicy);
     if (!plan) return false;
     const compactionId = randomUUID();
     const common = { run_id: runId, compaction_id: compactionId, trigger, source: plan.source };
@@ -500,12 +500,11 @@ export class AgentLoopService {
     return this.outcome(sessionId, settled.run);
   }
 
-  private async load(sessionId: string, runId: string): Promise<{ state: ExecutionState; run: RunState; events: Event[] }> {
-    const events = await this.store.read(sessionId);
-    const state = replay(events);
+  private async load(sessionId: string, runId: string): Promise<{ state: ExecutionState; run: RunState }> {
+    const state = await this.store.readState(sessionId);
     const run = state.runs.get(runId);
     if (!run) throw new StoreError("missing_run", "Run does not exist in the session");
-    return { state, run, events };
+    return { state, run };
   }
 
   private outcome(sessionId: string, run: RunState): LoopOutcome {

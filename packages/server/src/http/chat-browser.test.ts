@@ -41,6 +41,41 @@ afterEach(async () => {
 });
 
 describe("product Chat controls in a real browser", () => {
+  it("requires an inspection note before releasing a durable workspace blocker", async () => {
+    await access(join(webRoot, "index.html"));
+    const root = await mkdtemp(join(tmpdir(), "fosil-blocker-browser-")); directories.push(root);
+    const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
+    const session = await store.execute({ type: "session.create", command_id: "create-blocked", workspace_root: root });
+    const run = await store.execute({ type: "run.submit", command_id: "submit-blocked", session_id: session.session_id, content: "Interrupted cleanup" });
+    const runId = run.run_id!;
+    await store.append({
+      schema_version: 1, session_id: session.session_id, recorded_at: "2026-09-01T00:00:00.000Z",
+      type: "run.finished", data: { run_id: runId, status: "failed", reason: "cleanup_failed", origin: "runner" }
+    });
+    let providerCalls = 0;
+    const provider: ModelProvider = { async *stream() { providerCalls++; yield finish("Unexpected call"); } };
+    const server = new ExecutionHttpServer({ store, webRoot,
+      loop: { provider, providerId: "controlled-blocker", model: "fixture", pollIntervalMs: 5, batchMs: 5 }, streamPollMs: 5 });
+    servers.push(server); const origin = await server.listen();
+    const browser = await chromium.launch({ headless: true }); browsers.push(browser);
+    const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
+    await page.goto(origin, { waitUntil: "domcontentloaded" });
+    await page.getByText("工作区已安全封锁").waitFor();
+    expect(await page.getByLabel("消息").isDisabled()).toBe(true);
+    await page.getByRole("button", { name: "核验并解除" }).click();
+    await page.getByRole("heading", { name: "核验工作区状态" }).waitFor();
+    expect(await page.getByRole("button", { name: "确认已核验并解除" }).isDisabled()).toBe(true);
+    await page.getByLabel("核验记录").fill("Inspected the workspace and process table; no child process or partial file change remains.");
+    await page.getByRole("button", { name: "确认已核验并解除" }).click();
+    await expect.poll(async () => (await store.getSession(session.session_id))?.workspace_blockers.length).toBe(0);
+    await expect.poll(async () => page.getByLabel("消息").isEnabled()).toBe(true);
+    const history = await store.read(session.session_id);
+    expect(history.at(-1)).toMatchObject({ type: "workspace.blocker.resolved", data: {
+      run_id: runId, call_id: null, reason: "cleanup_failed", acknowledged: true
+    } });
+    expect(providerCalls).toBe(0);
+  }, 30_000);
+
   it("configures a non-echoed API key and confirms record-only session and workspace deletion", async () => {
     await access(join(webRoot, "index.html"));
     const root = await mkdtemp(join(tmpdir(), "fosil-settings-browser-")); directories.push(root);
@@ -161,6 +196,7 @@ describe("product Chat controls in a real browser", () => {
     const root = await mkdtemp(join(tmpdir(), "fosil-chat-browser-")); directories.push(root);
     const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
     const releaseFirstFinish = gate();
+    const cancelProviderEntered = gate();
     let calls = 0;
     let cancelledProviderCleaned = false;
     const measuredFinish = (text: string, toolCalls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = []) => ({
@@ -183,6 +219,7 @@ describe("product Chat controls in a real browser", () => {
         return;
       }
       if (prompt === "Cancel the wait") {
+        cancelProviderEntered.resolve();
         try { await aborted(signal); } finally { cancelledProviderCleaned = true; }
         return;
       }
@@ -279,6 +316,7 @@ describe("product Chat controls in a real browser", () => {
     await page.getByLabel("消息").fill("Cancel the wait");
     await page.getByRole("button", { name: "发送" }).click();
     await page.getByRole("button", { name: "取消运行" }).waitFor();
+    await cancelProviderEntered.promise;
     await page.getByRole("button", { name: "取消运行" }).click();
     await page.locator('article[data-run-status="cancelled"]').last().waitFor();
     await expect.poll(() => cancelledProviderCleaned).toBe(true);

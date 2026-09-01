@@ -22,6 +22,7 @@ function dispatch(message: WorkerRequest): unknown {
     case "append_batch": return requireDatabase().appendBatch(message.events);
     case "command": return requireDatabase().execute(message.command, message.contentMetadata);
     case "read": return requireDatabase().read(message.sessionId);
+    case "read_state": return requireDatabase().readState(message.sessionId);
     case "history_page": return requireDatabase().readPage(message.request);
     case "session": return requireDatabase().getSession(message.sessionId);
     case "sessions": return requireDatabase().listSessions(message.request);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   absolutePathSchema, eventSchema, idSchema, isoTimestamp, nonnegativeIntSchema, positiveIntSchema
 } from "./execution-events.js";
+import { workspaceBlockerReasonSchema } from "./execution-events.js";
 
 export const historyCursorSchema = z.object({
   session_id: idSchema, after: nonnegativeIntSchema, through: nonnegativeIntSchema
@@ -23,7 +24,10 @@ export type HistoryPage = z.infer<typeof historyPageSchema>;
 /** Session discovery exposes one replay-derived summary shape for list and single-session reads. */
 export const sessionSummarySchema = z.object({
   session_id: idSchema, title: z.string().min(1), workspace_root: absolutePathSchema, last_seq: positiveIntSchema, active_run_id: idSchema.nullable(),
-  activity: z.enum(["idle", "running", "waiting_for_approval", "cancelling"]), updated_at: isoTimestamp
+  activity: z.enum(["idle", "running", "waiting_for_approval", "cancelling"]), updated_at: isoTimestamp,
+  workspace_blockers: z.array(z.object({
+    run_id: idSchema, call_id: idSchema.nullable(), reason: workspaceBlockerReasonSchema
+  }).strict())
 }).strict();
 export const sessionListRequestSchema = z.object({ after: idSchema.optional(), limit: positiveIntSchema.max(200).default(100) }).strict();
 export const sessionListSchema = z.object({ sessions: z.array(sessionSummarySchema), next_after: idSchema.nullable() }).strict();

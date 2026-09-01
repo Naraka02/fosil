@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { commandAckSchema, deletionResultSchema, historyPageSchema, sessionListSchema, sessionSummarySchema, workspaceDeleteRequestSchema, parseCommand, parseEvent, type Command, type CommandAck, type DeletionResult, type Event, type EventInput, type HistoryPage, type HistoryPageRequest, type SessionList, type SessionListRequest } from "@fosil/contracts";
 import { isWorkerResponse, StoreError, type RecoveryReport, type SessionSummary, type WorkerCommand, type WorkerRequest } from "./storage-protocol.js";
 import { ConfiguredSecretMasker, maskEventInput } from "./content-policy.js";
+import type { ExecutionState } from "@fosil/core";
 
 export type StoreEvent = Event;
 export { StoreError } from "./storage-protocol.js";
@@ -114,6 +115,15 @@ export class SqliteWorkerStore {
   async read(sessionId: string): Promise<Event[]> {
     const result = await this.call({ type: "read", sessionId });
     return (result as unknown[]).map(parseEvent);
+  }
+
+  async readState(sessionId: string): Promise<ExecutionState> {
+    const state = await this.call({ type: "read_state", sessionId }) as ExecutionState;
+    if (!state || state.sessionId !== sessionId || !(state.runs instanceof Map)
+      || !(state.compactions instanceof Map) || !(state.resolvedWorkspaceBlockers instanceof Set)) {
+      throw new StoreError("worker_protocol", "SQLite worker returned an invalid execution state");
+    }
+    return state;
   }
 
   async readPage(request: HistoryPageRequest): Promise<HistoryPage> {

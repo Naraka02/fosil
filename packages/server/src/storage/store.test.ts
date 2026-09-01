@@ -305,7 +305,57 @@ describe("SQLite worker store", () => {
     const again = createStore();
     expect((await again.open(path)).blocked_workspaces).toEqual([expect.objectContaining({ reason: "cleanup_failed" })]);
     expect(await again.read(run.sessionId)).toEqual(prefix);
+    expect((await again.getSession(run.sessionId))?.workspace_blockers).toEqual([
+      { run_id: run.runId, call_id: null, reason: "cleanup_failed" }
+    ]);
+    await expect(again.execute({
+      type: "workspace.blocker.resolve", session_id: run.sessionId, run_id: run.runId, command_id: "wrong-root",
+      call_id: null, reason: "cleanup_failed", workspace_root: "/tmp/wrong", acknowledged: true, note: "Checked"
+    })).rejects.toMatchObject({ code: "workspace_mismatch" });
+    const resolved = await again.execute({
+      type: "workspace.blocker.resolve", session_id: run.sessionId, run_id: run.runId, command_id: "resolve-cleanup",
+      call_id: null, reason: "cleanup_failed", workspace_root: dirname(path), acknowledged: true,
+      note: "Inspected the fixture workspace and confirmed that no child process remains."
+    });
+    expect(resolved.run_id).toBe(run.runId);
+    expect((await again.getSession(run.sessionId))?.workspace_blockers).toEqual([]);
+    await expect(again.execute({
+      type: "workspace.blocker.resolve", session_id: run.sessionId, run_id: run.runId, command_id: "duplicate-resolution",
+      call_id: null, reason: "cleanup_failed", workspace_root: dirname(path), acknowledged: true, note: "Checked again"
+    })).rejects.toMatchObject({ code: "blocker_not_found" });
+    const nowSafe = await again.execute({ type: "run.submit", session_id: run.sessionId, command_id: "after-resolution", content: "Continue" });
+    expect(nowSafe.run_id).not.toBeNull();
+    await again.close();
+    const finalReader = createStore();
+    expect((await finalReader.open(path)).blocked_workspaces).toEqual([]);
+    expect((await finalReader.read(run.sessionId)).some((event) => event.type === "workspace.blocker.resolved"
+      && event.data.note.includes("no child process"))).toBe(true);
   });
+
+  it("serves bounded warm state reads for a long session and invalidates rolled-back derived state", async () => {
+    const path = await databasePath();
+    const store = createStore(); await store.open(path);
+    const session = await createSession(store, path);
+    const events: EventInput[] = [];
+    for (let index = 0; index < 500; index++) {
+      const runId = `history-run-${index}`;
+      events.push(
+        input("run.started", { run_id: runId, command_id: `history-command-${index}`, origin: "runner" }, session.session_id),
+        input("user.message", { run_id: runId, command_id: `history-command-${index}`, content: `Inspect ${index}`, origin: "user" }, session.session_id),
+        input("run.finished", { run_id: runId, status: "failed", reason: "runner_error", origin: "runner" }, session.session_id)
+      );
+    }
+    await store.appendBatch(events);
+    const expected = await store.readState(session.session_id);
+    const started = performance.now();
+    for (let index = 0; index < 100; index++) expect((await store.readState(session.session_id)).lastSeq).toBe(expected.lastSeq);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    await expect(store.appendBatch([
+      input("run.started", { run_id: "rolled-back", command_id: "rollback", origin: "runner" }, session.session_id),
+      input("run.started", { run_id: "invalid-second", command_id: "invalid", origin: "runner" }, session.session_id)
+    ])).rejects.toThrow();
+    expect((await store.readState(session.session_id)).lastSeq).toBe(expected.lastSeq);
+  }, 15_000);
 
   it.each(["before_dispatch", "after_dispatch", "after_result"] as const)("recovers a killed fixture at %s without repeating its side effect", async (boundary) => {
     const path = await databasePath();

@@ -1,6 +1,7 @@
 import { readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+import { builtinModules } from "node:module";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const packages = ["acceptance", "contracts", "core", "server", "web"];
@@ -11,6 +12,8 @@ const allowedDependencies = {
   server: new Set(["@fosil/contracts", "@fosil/core"]),
   web: new Set(["@fosil/contracts"])
 };
+const nodeBuiltins = new Set(builtinModules.map((value) => value.replace(/^node:/u, "")));
+const browserIndependentPackages = new Set(["contracts", "core", "web"]);
 
 async function files(path) {
   const entries = await readdir(path, { withFileTypes: true });
@@ -50,10 +53,18 @@ for (const path of await files(join(root, "packages", "server", "dist"))) {
 for (const path of sourceFiles) {
   const dependencies = [];
   const content = await readFile(path, "utf8");
-  for (const match of content.matchAll(/(?:import|export)[\s\S]*?\bfrom\s+["'`]([^"'`]+)["'`]/gu)) {
-    const specifier = match[1];
+  const specifiers = [
+    ...content.matchAll(/(?:import|export)[\s\S]*?\bfrom\s+["'`]([^"'`]+)["'`]/gu),
+    ...content.matchAll(/\bimport\s*["'`]([^"'`]+)["'`]/gu)
+  ].map((match) => match[1]);
+  for (const specifier of specifiers) {
+    const packageName = path.split("/packages/")[1]?.split("/")[0];
+    const bareBuiltin = specifier.replace(/^node:/u, "");
+    if (packageName && browserIndependentPackages.has(packageName) && nodeBuiltins.has(bareBuiltin)) {
+      failures.push(`${path} imports forbidden Node built-in ${specifier}`);
+      continue;
+    }
     if (specifier.startsWith("@fosil/")) {
-      const packageName = path.split("/packages/")[1]?.split("/")[0];
       if (specifier === `@fosil/${packageName}`) failures.push(`${path} imports through its own package barrel`);
       else if (packageName && !allowedDependencies[packageName]?.has(specifier)) failures.push(`${path} crosses forbidden package boundary to ${specifier}`);
       continue;
@@ -62,7 +73,11 @@ for (const path of sourceFiles) {
     const base = normalize(join(dirname(path), specifier.replace(/\.js$/u, "")));
     const target = [base + ".ts", base + ".tsx", join(base, "index.ts"), join(base, "index.tsx")]
       .find((candidate) => sourceFiles.has(candidate));
-    if (target) dependencies.push(target);
+    if (target) {
+      const targetPackage = target.split("/packages/")[1]?.split("/")[0];
+      if (packageName && targetPackage !== packageName) failures.push(`${path} crosses a package source boundary to ${target}`);
+      dependencies.push(target);
+    }
   }
   sourceGraph.set(path, [...new Set(dependencies)]);
 }

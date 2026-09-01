@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { approvalModeSchema, absolutePathSchema, idSchema, positiveIntSchema } from "./execution-events.js";
+import { approvalModeSchema, absolutePathSchema, idSchema, positiveIntSchema, workspaceBlockerReasonSchema } from "./execution-events.js";
 
 /** User commands contain no server-assigned identities or timestamps. */
 export const commandSchema = z.discriminatedUnion("type", [
@@ -9,6 +9,11 @@ export const commandSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("approval.resolve"), command_id: idSchema, session_id: idSchema, run_id: idSchema,
     approval_id: idSchema, decision: z.enum(["allow", "deny"])
+  }).strict(),
+  z.object({
+    type: z.literal("workspace.blocker.resolve"), command_id: idSchema, session_id: idSchema, run_id: idSchema,
+    call_id: idSchema.nullable(), reason: workspaceBlockerReasonSchema, workspace_root: absolutePathSchema,
+    acknowledged: z.literal(true), note: z.string().trim().min(1).max(2_000)
   }).strict()
 ]);
 

@@ -20,8 +20,8 @@ const finish = (text = "Done", tool_calls: Array<{ provider_call_id: string; nam
   type: "finish", output: { text, reasoning: null, tool_calls }, usage, stop_reason: tool_calls.length ? "tool_calls" : "stop"
 });
 const gate = () => { let resolve!: () => void; const promise = new Promise<void>((r) => { resolve = r; }); return { promise, resolve }; };
-async function until(check: () => Promise<boolean> | boolean) {
-  const end = Date.now() + 5000;
+async function until(check: () => Promise<boolean> | boolean, timeoutMs = 5000) {
+  const end = Date.now() + timeoutMs;
   while (!await check()) { if (Date.now() >= end) throw new Error("Timed out waiting for fixture state"); await new Promise((r) => setTimeout(r, 5)); }
 }
 const onAbort = (signal: AbortSignal) => new Promise<void>((resolve) => {
@@ -455,7 +455,7 @@ describe("durable event SSE", () => {
   it("disconnects a real nonreading socket under backpressure without fetching another event", async () => {
     const f = await fixture(undefined, { maxStreams: 1, drainTimeoutMs: 30 }); const { session_id } = await f.create();
     const events: EventInput[] = [];
-    for (let index = 0; index < 80; index++) {
+    for (let index = 0; index < 240; index++) {
       const runId = `large-run-${index}`;
       const envelope = { schema_version: 1 as const, session_id, recorded_at: new Date().toISOString() };
       events.push(
@@ -464,25 +464,26 @@ describe("durable event SSE", () => {
           content: "x".repeat(96 * 1024), origin: "user" } },
         { ...envelope, type: "run.finished", data: { run_id: runId, status: "failed", reason: "runner_error", origin: "runner" } }
       );
+      if (events.length === 180) await f.store.appendBatch(events.splice(0));
     }
-    await f.store.appendBatch(events);
+    if (events.length > 0) await f.store.appendBatch(events);
     const address = new URL(f.origin);
     const socket: Socket = connect(Number(address.port), "127.0.0.1"); connections.push(socket); socket.on("error", () => {});
     await new Promise<void>((resolve) => socket.once("connect", resolve)); socket.pause();
     socket.write(`GET /api/sessions/${session_id}/events?after=1 HTTP/1.1\r\nHost: ${address.host}\r\n\r\n`);
-    await until(() => f.store.pageReads >= 3);
+    await until(() => f.store.pageReads >= 3, 15_000);
     let stoppedAt = 0;
     await until(async () => {
       const before = f.store.pageReads;
       await new Promise((resolve) => setTimeout(resolve, 100));
       stoppedAt = f.store.pageReads;
       return stoppedAt === before;
-    });
+    }, 15_000);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(f.store.pageReads).toBe(stoppedAt);
     expect(stoppedAt).toBeLessThan((await f.store.getSession(session_id))!.last_seq);
     const next = await stream(f.origin, session_id, "3"); expect(next.response.statusCode).toBe(200); next.close(); socket.destroy();
-  }, 15_000);
+  }, 30_000);
 
   it("shuts down subscribers and provider ownership while leaving the caller store usable and recovery honest", async () => {
     let entered = false, cleaned = false;

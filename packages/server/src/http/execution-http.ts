@@ -263,7 +263,8 @@ export class ExecutionHttpServer {
       const code = error.code;
       if (code === "session_not_found") return new HttpError(404, code, "Session does not exist");
       if (code === "workspace_not_found") return new HttpError(404, code, "Workspace has no saved sessions");
-      if (["command_conflict", "session_busy", "run_not_active", "run_cancelling", "approval_not_pending", "approval_expired", "workspace_blocked"].includes(code)) {
+      if (["command_conflict", "session_busy", "run_not_active", "run_cancelling", "approval_not_pending", "approval_expired",
+        "workspace_blocked", "workspace_mismatch", "blocker_not_found"].includes(code)) {
         return new HttpError(409, code, "Command conflicts with saved state");
       }
       if (["invalid_cursor", "invalid_workspace", "invalid_session", "validation_failed", "ENOENT", "ENOTDIR", "EACCES"].includes(code)) return new HttpError(400, code, "Invalid request or unavailable workspace");

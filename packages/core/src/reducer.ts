@@ -5,7 +5,7 @@ import {
 import {
   EventReducerError, initialState,
   type Activity, type ApprovalState, type CompactionState, type ExecutionState,
-  type RequestState, type RunState, type StepState, type ToolState
+  type RequestState, type RunState, type StepState, type ToolState, workspaceBlockerKey
 } from "./state.js";
 
 export { parseEvent, parseEventInput, sessionCreatedEventInputSchema } from "@fosil/contracts";
@@ -128,6 +128,28 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
   requireFact(previous.lastSeq > 0 && previous.workspaceRoot !== null && event.session_id === previous.sessionId,
     "wrong-session", "event requires an initialized matching session");
   requireFact(event.seq === previous.lastSeq + 1, "order-gap", `expected seq ${previous.lastSeq + 1}`);
+
+  if (event.type === "workspace.blocker.resolved") {
+    requireFact(previous.activeRunId === null && previous.activity === "idle",
+      "busy-session", "workspace uncertainty can be resolved only while the session is idle");
+    requireFact(event.data.workspace_root === previous.workspaceRoot,
+      "wrong-workspace", "workspace resolution must confirm the session's exact workspace");
+    const run = previous.runs.get(event.data.run_id);
+    requireFact(run && ["completed", "failed", "cancelled", "interrupted"].includes(run.status),
+      "wrong-correlation", "workspace resolution requires a terminal run");
+    const matches = event.data.reason === "cleanup_failed"
+      ? event.data.call_id === null && (run.reason === "cleanup_failed" || run.blockedReason === "cleanup_failed")
+      : event.data.call_id !== null && (() => {
+        const call = run.tools.get(event.data.call_id);
+        return call?.started === true && call.status === "interrupted";
+      })();
+    requireFact(matches, "blocker-not-found", "workspace resolution does not match a durable blocker");
+    const key = workspaceBlockerKey(event.data.run_id, event.data.call_id, event.data.reason);
+    requireFact(!previous.resolvedWorkspaceBlockers.has(key), "duplicate-resolution", "workspace blocker was already resolved");
+    const resolvedWorkspaceBlockers = new Set(previous.resolvedWorkspaceBlockers);
+    resolvedWorkspaceBlockers.add(key);
+    return { ...previous, lastSeq: previous.lastSeq + 1, resolvedWorkspaceBlockers };
+  }
 
   if (event.type === "run.started") {
     requireFact(previous.activeRunId === null, "busy-session", "a session can have only one active run");

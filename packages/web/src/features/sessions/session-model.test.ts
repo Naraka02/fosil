@@ -3,7 +3,8 @@ import type { SessionSummary } from "@fosil/contracts";
 import { groupSessionsByWorkspace, sortSessionsByRecent } from "./session-model.js";
 
 const session = (session_id: string, workspace_root: string, updated_at: string): SessionSummary => ({
-  session_id, title: `Title ${session_id}`, workspace_root, updated_at, last_seq: 1, active_run_id: null, activity: "idle"
+  session_id, title: `Title ${session_id}`, workspace_root, updated_at, last_seq: 1, active_run_id: null, activity: "idle",
+  workspace_blockers: []
 });
 
 describe("workspace session navigation", () => {

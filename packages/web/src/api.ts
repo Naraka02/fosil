@@ -73,7 +73,8 @@ export async function sendCommand(command: Command): Promise<CommandAck> {
     const ack = commandAckSchema.parse(body);
     const correlated = ack.command_id === command.command_id
       && (command.type === "session.create" ? ack.run_id === null : (ack.session_id === command.session_id && ack.run_id !== null))
-      && (command.type !== "run.cancel" && command.type !== "approval.resolve" || ack.run_id === command.run_id);
+      && (command.type !== "run.cancel" && command.type !== "approval.resolve" && command.type !== "workspace.blocker.resolve"
+        || ack.run_id === command.run_id);
     if (!correlated) throw new Error("receipt correlation mismatch");
     return ack;
   } catch { throw new CommandDeliveryError("The service returned an invalid command receipt", true); }

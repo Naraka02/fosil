@@ -20,7 +20,7 @@ Replaying a history starts from empty state and applies its recorded events in o
 
 `initialState(sessionId?)` creates empty execution state, optionally bound to an expected session identity. `applyEvent(state, event)` validates one event and returns the next state; `replay(events, sessionId?)` applies a complete ordered history from empty state. Invalid event shapes fail schema parsing, while invalid histories raise `EventReducerError` with a diagnostic `code`.
 
-State keeps runs and their steps, requests, tools, and approvals in maps keyed by identity. Tool state retains a `started` flag after settlement so an interrupted dispatched call remains distinguishable from an unstarted one. A `tool.call.created` event may retain `execution_mode` as `parallel` or `exclusive`; replay treats an earlier event without the field as exclusive. Active tool identity is projected as a read-only set, with the legacy singular field retained as a compatibility view. State is an in-memory domain projection, not a JSON wire format or a replacement for canonical events. Callers must treat returned state as read-only and retain the events separately when they need the full evidence record.
+State keeps runs and their steps, requests, tools, and approvals in maps keyed by identity. Tool state retains a `started` flag after settlement so an interrupted dispatched call remains distinguishable from an unstarted one. A `tool.call.created` event may retain `execution_mode` as `parallel` or `exclusive`; replay treats an earlier event without the field as exclusive. Active tool identity is projected as a read-only set, with the legacy singular field retained as a compatibility view. Exact `workspace.blocker.resolved` facts are retained as derived resolution keys so blocker projection can exclude only the attested correlation. State is an in-memory domain projection, not a JSON wire format or a replacement for canonical events. Callers must treat returned state as read-only and retain the events separately when they need the full evidence record.
 
 ## Lifecycle boundary
 
@@ -33,6 +33,8 @@ A completed step accounts for every complete tool call returned by its request. 
 Gated tools cannot start before their matching approval is allowed. The approval identifies the frozen call, arguments, and deadline, and can settle only once. Denial or expiry closes the call without a start event. Parameter-validation failure can also close a call before dispatch. An allowance cannot override an already accepted cancellation intent.
 
 `run.cancel_requested` records intent and prevents new dispatch. It does not implicitly complete requests, tools, approvals, or steps. A run can reach a terminal status only after its open children have settled. Recovery-origin terminal facts represent reported interruption; replay does not create those facts or resume the operation.
+
+`workspace.blocker.resolved` is legal only in an idle session after a terminal run. Its run, optional call, reason, and exact workspace must match a blocker derivable from prior durable facts, and the same correlation can be resolved only once. The event records acknowledgement and an operator note but does not change the terminal run or tool result. The [recovery reference](recovery.md#workspace-uncertainty) owns its admission and safety meaning.
 
 ## Retained output and measurements
 

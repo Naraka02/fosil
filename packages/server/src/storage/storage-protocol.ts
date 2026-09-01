@@ -6,6 +6,7 @@ export type WorkerCommand =
   | { type: "append_batch"; events: readonly EventInput[] }
   | { type: "command"; command: Command; contentMetadata?: readonly ContentMetadata[] }
   | { type: "read"; sessionId: string }
+  | { type: "read_state"; sessionId: string }
   | { type: "history_page"; request: HistoryPageRequest }
   | { type: "session"; sessionId: string }
   | { type: "sessions"; request: SessionListRequest }

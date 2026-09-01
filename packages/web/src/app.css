@@ -184,6 +184,11 @@ svg { display: block; }
 .approval-actions button { min-width: 61px; }
 .approval-actions button:last-child { min-width: 102px; border-color: var(--accent); background: var(--accent); color: #fff; }
 .run-note { color: var(--muted); font-size: .73rem; }
+.blocker-notice { display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid #e7c79d; background: #fff8ed; padding: 11px clamp(18px,4vw,42px); color: #6f4b22; }
+.blocker-notice strong, .blocker-notice span { display: block; }
+.blocker-notice strong { font-size: .72rem; }
+.blocker-notice span { margin-top: 2px; font-size: .63rem; line-height: 1.45; }
+.blocker-notice button { flex: none; border-color: #c78332; background: #fff; color: #87541b; font-size: .66rem; }
 
 .composer { width: 100%; flex: none; border: 0; background: #fff; padding: 0 clamp(24px,7vw,110px) 24px; }
 .composer-box { width: min(976px,100%); margin: auto; border: 1px solid #dfe2e6; border-radius: 27px; background: #fff; box-shadow: 0 3px 9px rgba(28,36,50,.08); overflow: visible; }
@@ -440,6 +445,17 @@ svg { display: block; }
 .credential-message.error { border-left-color: var(--danger); background: #fff5f4; color: #8c3c37; }
 .credential-save { min-width: 124px; margin-top: 18px; border-color: var(--accent); background: var(--accent); color: #fff; }
 .delete-dialog { width: min(540px,100%); }
+.resolution-dialog { width: min(620px,100%); }
+.resolution-confirm { padding: 18px 26px 25px; }
+.resolution-confirm .eyebrow { color: #9a5d18; font-size: .58rem; font-weight: 700; letter-spacing: .06em; }
+.resolution-confirm h3 { margin: 4px 0 9px; font-size: 1rem; }
+.resolution-confirm > p:not(.eyebrow) { margin: 0; color: #626b76; font-size: .72rem; line-height: 1.65; }
+.resolution-confirm dl { display: grid; gap: 7px; margin: 16px 0; border: 1px solid #e5e7ea; border-radius: 10px; background: #fafafa; padding: 11px 13px; }
+.resolution-confirm dl div { display: grid; grid-template-columns: 78px minmax(0,1fr); gap: 10px; }
+.resolution-confirm dt { color: #8b929b; font-size: .61rem; }
+.resolution-confirm dd { margin: 0; overflow-wrap: anywhere; font: .62rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.resolution-confirm label { display: block; margin-bottom: 7px; font-size: .68rem; font-weight: 600; }
+.resolution-confirm textarea { resize: vertical; font-size: .72rem; line-height: 1.55; }
 .delete-confirm { display: flex; align-items: flex-start; gap: 15px; padding: 17px 26px 28px; }
 .delete-mark { display: grid; width: 36px; height: 36px; flex: none; place-items: center; border-radius: 10px; background: #f8e5e3; color: var(--danger); }
 .delete-mark svg { width: 18px; height: 18px; }
