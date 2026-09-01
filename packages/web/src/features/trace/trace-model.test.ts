@@ -7,6 +7,12 @@ const event = (seq: number, type: Event["type"], data: unknown, second = seq): E
 const correlation = { run_id: "run", step: 1, request_id: "request", attempt: 1 };
 const usage = { input_tokens: null, output_tokens: 3, total_tokens: null, cache_read_tokens: null, cache_write_tokens: 0 };
 const request = { provider: "controlled", model: "fixture", system_instructions: ["Inspect"], messages: [{ role: "system", content: { kind: "context_checkpoint", summary: "Earlier work is complete." } }, { role: "user", content: "Edit" }], tools: [{ name: "edit_file", parameters: { type: "object" } }], settings: { temperature: null, top_p: 0, max_output_tokens: null } } as const;
+const contextComposition = {
+  measurement: { estimated_input_tokens: 120, serialized_bytes: 480, hard_input_tokens: 904_000 },
+  contributions: [{ kind: "checkpoint", label: "Context checkpoint", disposition: "included",
+    estimated_tokens: 30, serialized_bytes: 120, item_count: 1, source_ids: [], details: null }],
+  pruned_tool_results: []
+} as const;
 
 function history(): Event[] {
   return [
@@ -14,7 +20,7 @@ function history(): Event[] {
     event(2, "run.started", { run_id: "run", command_id: "submit", approval_mode: "workspace_write", origin: "user" }),
     event(3, "user.message", { run_id: "run", command_id: "submit", content: "Edit", origin: "user" }),
     event(4, "step.started", { run_id: "run", step: 1 }),
-    event(5, "model.request.started", { ...correlation, request, origin: "runner" }),
+    event(5, "model.request.started", { ...correlation, request, context_composition: contextComposition, origin: "runner" }),
     event(6, "model.response.delta", { ...correlation, delta_index: 1, delta: { kind: "text", text: "final" } }),
     event(7, "model.request.finished", { ...correlation, status: "succeeded", reason: "completed", output: { text: "final", reasoning: null, tool_calls: [{ provider_call_id: "provider-call", name: "edit_file", arguments: { path: "target.txt" } }] }, stop_reason: "tool_calls", usage, timings: { first_content_ms: 0, duration_ms: null }, error: null, origin: "provider" }),
     event(8, "tool.call.created", { ...correlation, call_id: "call", provider_call_id: "provider-call", tool_name: "edit_file", arguments: { path: "target.txt", content: "after" }, cwd: "/tmp/project", requires_approval: true, approval_id: "approval", origin: "provider" }),
@@ -35,7 +41,8 @@ describe("Trace projection", () => {
     expect(trace.timeline.map((item) => item.startedSeq)).toEqual([3, 5, 8, 9]);
     expect(trace.timeline[0]).toMatchObject({ kind: "user", content: "Edit", commandId: "submit", approvalMode: "workspace_write", recordedAt: at(3) });
     const model = trace.records.find((record) => record.kind === "model")!;
-    expect(model).toMatchObject({ id: "model:request", requestId: "request", status: "succeeded", request, output: { text: "final" }, deltas: [{ kind: "text", text: "final" }], usage });
+    expect(model).toMatchObject({ id: "model:request", requestId: "request", status: "succeeded", request,
+      contextComposition, output: { text: "final" }, deltas: [{ kind: "text", text: "final" }], usage });
     const tool = trace.records.find((record) => record.kind === "tool")!;
     expect(tool).toMatchObject({ id: "tool:call", requestId: "request", callId: "call", status: "succeeded", evidence: { kind: "file_change", data: { diff: "--- a/target.txt\n+++ b/target.txt\n" } } });
     const approval = trace.records.find((record) => record.kind === "approval")!;

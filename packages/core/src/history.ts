@@ -24,7 +24,8 @@ export function buildModelHistory(state: ExecutionState): ModelHistoryMessage[] 
   if (checkpoint && result) messages.push({
     role: "system", compaction_id: checkpoint.compactionId,
     content: { kind: "context_checkpoint", summary: result.summary, facts: result.facts,
-      source: { ...result.source, retained_tail_tokens: result.retained_tail_tokens } }
+      source: { ...result.source, retained_tail_tokens: result.retained_tail_tokens,
+        shadowed_event_seqs: result.shadowed_event_seqs ?? [], pruned_tool_results: result.pruned_tool_results ?? [] } }
   });
   for (const run of state.runs.values()) {
     if (run.userMessage !== null && !shadowedRuns.has(run.runId)) messages.push({ role: "user", run_id: run.runId, content: run.userMessage });

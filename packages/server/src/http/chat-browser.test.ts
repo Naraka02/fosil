@@ -245,6 +245,7 @@ describe("product Chat controls in a real browser", () => {
     const root = await mkdtemp(join(tmpdir(), "fosil-trace-browser-")); directories.push(root);
     const before = "before\n", after = "after\n";
     await writeFile(join(root, "target.txt"), before);
+    await writeFile(join(root, "AGENTS.md"), "Preserve the browser Trace context boundary.\n");
     const digest = createHash("sha256").update(before).digest("hex");
     const store = new SqliteWorkerStore(workerUrl); stores.push(store); await store.open(join(root, "events.db"));
     let calls = 0;
@@ -302,6 +303,10 @@ describe("product Chat controls in a real browser", () => {
     await page.locator('.trace-event[data-kind="assistant"]').first().click();
     const modelDetail = page.locator(".trace-inspector");
     await expect.poll(() => modelDetail.innerText()).toContain(firstRequest.data.request_id);
+    expect(await modelDetail.innerText()).toContain("Context Composition");
+    expect(await modelDetail.innerText()).toContain("Workspace instructions");
+    expect(await modelDetail.locator(".trace-section").filter({ hasText: "实际发送消息" }).innerText())
+      .toContain("Preserve the browser Trace context boundary");
     expect(await modelDetail.locator(".trace-section").filter({ hasText: "组装输出" }).innerText()).toContain("Requesting managed edit.");
     expect(await modelDetail.locator(".trace-section").filter({ hasText: "提供方用量" }).innerText()).toContain("未知");
     const closeTop = Math.round((await traceClose.boundingBox())!.y);

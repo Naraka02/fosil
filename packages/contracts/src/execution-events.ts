@@ -138,8 +138,39 @@ export const contextMeasurementSchema = z.object({
   hard_input_tokens: positiveInt
 }).strict();
 
+export const prunedToolResultSchema = z.object({
+  message_index: nonnegativeInt,
+  tool_name: id,
+  tool_call_id: id,
+  original_chars: nonnegativeInt,
+  retained_chars: nonnegativeInt,
+  original_bytes: nonnegativeInt,
+  retained_bytes: nonnegativeInt,
+  sha256
+}).strict();
+
+export const contextContributionSchema = z.object({
+  kind: z.enum([
+    "system_instructions", "workspace_instructions", "checkpoint", "recent_history",
+    "tool_schemas", "tool_result_pruning"
+  ]),
+  label: z.string(),
+  disposition: z.enum(["included", "transformed", "omitted"]),
+  estimated_tokens: nonnegativeInt,
+  serialized_bytes: nonnegativeInt,
+  item_count: nonnegativeInt,
+  source_ids: z.array(id),
+  details: jsonValueSchema.nullable()
+}).strict();
+
+export const contextCompositionSchema = z.object({
+  measurement: contextMeasurementSchema.nullable(),
+  contributions: z.array(contextContributionSchema),
+  pruned_tool_results: z.array(prunedToolResultSchema)
+}).strict();
+
 export const contextFactSchema = z.object({
-  kind: z.enum(["objective", "constraint", "file_change", "tool_outcome", "test_result", "blocker", "next_action"]),
+  kind: z.enum(["objective", "constraint", "decision", "file_change", "tool_outcome", "test_result", "blocker", "next_action"]),
   text: z.string(),
   source_ids: z.array(id)
 }).strict();
@@ -176,6 +207,7 @@ export const stepFinishedEventSchema = envelope("step.finished", z.object({
 
 export const modelRequestStartedEventSchema = envelope("model.request.started", z.object({
   ...correlation, request: modelRequestContextSchema,
+  context_composition: contextCompositionSchema.optional(),
   provider_request: providerRequestMetadataSchema.nullable().optional(), origin: z.literal("runner")
 }).strict());
 export const modelResponseDeltaEventSchema = envelope("model.response.delta", z.object({
@@ -211,6 +243,7 @@ const compactionBase = {
 export const contextCompactionStartedEventSchema = envelope("context.compaction.started", z.object({
   ...compactionBase,
   request: modelRequestContextSchema,
+  context_composition: contextCompositionSchema.optional(),
   provider_request: providerRequestMetadataSchema.nullable().optional(),
   before: contextMeasurementSchema,
   target_input_tokens: positiveInt,
@@ -225,6 +258,8 @@ export const contextCompactionSucceededEventSchema = envelope("context.compactio
   facts: z.array(contextFactSchema),
   shadowed_run_ids: z.array(id),
   shadowed_request_ids: z.array(id),
+  shadowed_event_seqs: z.array(positiveInt).optional(),
+  pruned_tool_results: z.array(prunedToolResultSchema).optional(),
   retained_tail_tokens: nonnegativeInt,
   after: contextMeasurementSchema,
   usage: usageSchema,
@@ -314,6 +349,9 @@ export type ContentMetadata = z.infer<typeof contentMetadataSchema>;
 export type ProviderRequestMetadata = z.infer<typeof providerRequestMetadataSchema>;
 export type ProviderResponseMetadata = z.infer<typeof providerResponseMetadataSchema>;
 export type ContextMeasurement = z.infer<typeof contextMeasurementSchema>;
+export type ContextComposition = z.infer<typeof contextCompositionSchema>;
+export type ContextContribution = z.infer<typeof contextContributionSchema>;
+export type PrunedToolResult = z.infer<typeof prunedToolResultSchema>;
 export type ContextFact = z.infer<typeof contextFactSchema>;
 
 export function parseEvent(value: unknown): Event { return eventSchema.parse(value); }

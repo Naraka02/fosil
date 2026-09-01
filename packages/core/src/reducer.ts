@@ -262,9 +262,12 @@ export function applyEvent(previous: ExecutionState, rawEvent: unknown): Executi
       const succeeded = event.type === "context.compaction.succeeded";
       if (succeeded) {
         const shadowedRequests = new Set(event.data.shadowed_request_ids);
+        const shadowedEventSeqs = event.data.shadowed_event_seqs ?? [];
         requireFact(event.data.shadowed_run_ids.every((id) => previous.runs.has(id))
           && event.data.shadowed_request_ids.every((id) => [...previous.runs.values()].some((candidate) => candidate.requests.has(id)))
-          && ![...run.requests.values()].some((request) => request.status === "running" && shadowedRequests.has(request.requestId)),
+          && ![...run.requests.values()].some((request) => request.status === "running" && shadowedRequests.has(request.requestId))
+          && shadowedEventSeqs.every((seq, index) => seq <= event.data.source.through_seq
+            && (index === 0 || shadowedEventSeqs[index - 1]! < seq)),
         "invalid-compaction", "compaction cannot shadow unknown or open execution identities");
       }
       const update: CompactionState = { ...compaction, status: succeeded ? "succeeded" : "failed",

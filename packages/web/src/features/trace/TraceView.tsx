@@ -87,10 +87,11 @@ function ModelDetail({ record }: { record: ModelTraceRecord }) {
   return <>
     <Identity record={record} />
     <section className="trace-section"><h3>请求</h3><dl className="metric-grid"><div><dt>提供方</dt><dd>{record.request.provider}</dd></div><div><dt>模型</dt><dd>{record.request.model}</dd></div><div><dt>状态</dt><dd><StatusPill status={record.status} /></dd></div><div><dt>原因</dt><dd>{record.reason ?? "未知"}</dd></div></dl></section>
+    <section className="trace-section"><h3>Context Composition</h3>{record.contextComposition ? <><dl className="metric-grid"><div><dt>本地估算输入</dt><dd>{metric(record.contextComposition.measurement?.estimated_input_tokens ?? null)}</dd></div><div><dt>序列化大小</dt><dd>{metric(record.contextComposition.measurement?.serialized_bytes ?? null, " bytes")}</dd></div><div><dt>输入硬上限</dt><dd>{metric(record.contextComposition.measurement?.hard_input_tokens ?? null)}</dd></div><div><dt>工具结果裁剪</dt><dd>{record.contextComposition.pruned_tool_results.length}</dd></div></dl><div className="context-contribution-list">{record.contextComposition.contributions.map((item, index) => <details className="trace-fold" key={`${item.kind}:${index}`}><summary>{item.label} · {item.disposition} · {item.estimated_tokens} tokens / {item.serialized_bytes} bytes</summary><pre>{text(item)}</pre></details>)}</div></> : <p className="unknown">旧请求未记录 Context Composition；下方仍是当时实际保存的请求。</p>}</section>
     <JsonPanel title="生效设置" value={record.request.settings} />
-    <JsonPanel title="系统指令" value={record.request.system_instructions} />
-    <JsonPanel title="已发送消息" value={record.request.messages} />
-    <JsonPanel title="已发送工具" value={record.request.tools} />
+    <JsonPanel title="实际系统指令" value={record.request.system_instructions} />
+    <JsonPanel title="实际发送消息" value={record.request.messages} />
+    <JsonPanel title="实际发送工具" value={record.request.tools} />
     <section className="trace-section"><h3>输出测量</h3><dl className="metric-grid"><div><dt>首个已提交内容边界</dt><dd>{metric(record.timings?.first_content_ms ?? null, " ms")}</dd></div><div><dt>请求耗时</dt><dd>{metric(record.timings?.duration_ms ?? null, " ms")}</dd></div><div><dt>停止原因</dt><dd>{record.stopReason ?? "未知"}</dd></div><div><dt>增量片段</dt><dd>{record.deltas.length}</dd></div></dl></section>
     <JsonPanel title="组装输出" value={record.output} empty="待定" />
     <details className="trace-fold"><summary>已提交流式片段 · {record.deltas.length}</summary><pre>{text(streamed)}</pre></details>

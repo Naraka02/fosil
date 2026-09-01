@@ -1,5 +1,5 @@
 import type {
-  ApprovalMode, ApprovalStatus, Event, ExecutionError, Evidence, JsonValue, ModelOutput, ModelRequestContext,
+  ApprovalMode, ApprovalStatus, ContextComposition, Event, ExecutionError, Evidence, JsonValue, ModelOutput, ModelRequestContext,
   RequestStatus, RunStatus, StepStatus, Timing, ToolStatus, Usage
 } from "@fosil/contracts";
 import { EventSequenceError } from "../chat/chat-model.js";
@@ -23,6 +23,7 @@ export interface ModelTraceRecord extends TraceRecordBase {
   status: RequestStatus;
   reason: string | null;
   request: ModelRequestContext;
+  contextComposition: ContextComposition | null;
   deltas: Delta[];
   output: ModelOutput | null;
   stopReason: string | null;
@@ -245,7 +246,8 @@ export function projectTrace(events: readonly Event[]): TraceProjection {
         const current: ModelTraceRecord = {
           kind: "model", id: `model:${event.data.request_id}`, runId: event.data.run_id, step: event.data.step,
           requestId: event.data.request_id, attempt: event.data.attempt, status: "running", reason: null,
-          request: event.data.request, deltas: [], output: null, stopReason: null, usage: null, timings: null,
+          request: event.data.request, contextComposition: event.data.context_composition ?? null,
+          deltas: [], output: null, stopReason: null, usage: null, timings: null,
           error: null, origin: event.data.origin, startedSeq: event.seq, finishedSeq: null, recordedAt: event.recorded_at, finishedAt: null
         };
         records.set(current.id, current); step(event.data.run_id, event.data.step).records.push(current); timeline.push(current); break;

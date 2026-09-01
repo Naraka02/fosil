@@ -8,9 +8,11 @@ This reference owns context measurement, durable compaction lifecycle, model-his
 
 Compaction never edits or deletes source events. Chat, Trace, recovery, and storage continue to use the complete canonical history. Model request assembly instead applies the latest successful checkpoint: the checkpoint becomes a system history item, shadowed user runs and request outputs are skipped, and the unshadowed raw tail follows it. A failed or interrupted compaction changes no projection.
 
-A successful checkpoint identifies the exact source prefix by last sequence, event count, and SHA-256 digest. It retains the generated summary and exposed reasoning, a deterministic fact ledger, shadowed run and request identities, the measured raw tail, before and after measurements, provider usage and timing, and provider response identity. Generated prose does not override the fact ledger or original events.
+A successful checkpoint identifies the exact source prefix by last sequence, event count, and SHA-256 digest. It retains the generated summary and exposed reasoning, a deterministic fact ledger, compatibility shadowed run and request identities, exact shadowed source event sequences, tool-result pruning records, the measured raw tail, before and after measurements, provider usage and timing, and provider response identity. Generated prose does not override the fact ledger or original events.
 
-The deterministic ledger preserves bounded objectives, file-change evidence, tool and shell outcomes, failed operations, and blocked-run facts from the selected prefix. Facts retain source identities. Existing checkpoint facts are carried forward when a later checkpoint supersedes their source history.
+The deterministic ledger preserves bounded objectives, file-change evidence, tool and shell outcomes including bounded result substance, failed operations, and blocked-run facts from the selected prefix. Facts retain source identities. Existing checkpoint facts are carried forward when a later checkpoint supersedes their source history.
+
+Before the summarization request is measured or dispatched, the same projection policy used by execution requests replaces each oversized settled tool result with an attributable head-and-tail preview. The canonical tool event remains unchanged, and the successful checkpoint records every transformation. A workspace instruction item is not summarized into an older checkpoint because request assembly reloads the current root `AGENTS.md`; target measurement still includes the current admitted workspace item.
 
 ## Eligibility and raw tail
 
@@ -36,7 +38,7 @@ Proactive compaction runs between model steps. If there is no eligible prefix, t
 
 ## Lifecycle
 
-`context.compaction.started` persists the source identity, exact compaction request, provider request metadata, pre-compaction measurement, target, trigger, and active run. One provider call then produces either `context.compaction.succeeded` or `context.compaction.failed`. Compaction deltas are not separate execution events; the terminal record retains its normalized summary or bounded error and the provider timing and usage.
+`context.compaction.started` persists the source identity, exact compaction request, Context Composition, provider request metadata, pre-compaction measurement, target, trigger, and active run. One provider call then produces either `context.compaction.succeeded` or `context.compaction.failed`. Compaction deltas are not separate execution events; the terminal record retains its normalized summary or bounded error and the provider timing and usage.
 
 The reducer permits one active compaction and no simultaneous provider request, tool dispatch, or pending approval transition. Startup recovery closes an unfinished compaction as failed with recovery provenance. It never fabricates a checkpoint from a request whose success was not committed.
 
@@ -50,4 +52,4 @@ Compaction failure, a second context rejection, or any non-context provider fail
 
 Checkpoint records and all immutable source events count toward the session's retained-payload budget; compaction does not reclaim disk or logical capacity. If normal capacity is exhausted, the loop stops new provider or tool dispatch and uses the terminal reserve to retain an attributable `limit_exceeded` settlement. Capacity failure does not authorize deleting older events or silently reducing a recorded request.
 
-The compaction integration tests cover proactive checkpoints, exact projection after shadowing, current-run preservation, file-change facts, failed-run preservation, and one context-recovery attempt. They use controlled providers; the [DeepSeek provider reference](deepseek-provider.md#failure-and-retry-boundary) states the remaining live acceptance boundary.
+The compaction and request-context tests cover proactive checkpoints, exact projection after shadowing, current-run preservation, file-change and bounded tool-result facts, oversized tool-result pruning, root workspace instruction refresh, failed-run preservation, and one context-recovery attempt. They use controlled providers; the [DeepSeek provider reference](deepseek-provider.md#failure-and-retry-boundary) states the remaining live acceptance boundary.

@@ -12,6 +12,10 @@ import {
   buildCompactionPlan, compactionTrigger, measureContext, projectedRequestAfterCompaction,
   type ContextWindowPolicy
 } from "./context-compaction.js";
+import {
+  describeContextComposition, pruneRequestToolResults, type RequestContextMetadata
+} from "./request-context.js";
+import { applyWorkspaceInstructions } from "./workspace-instructions.js";
 
 export interface AgentLoopOptions {
   provider: ModelProvider;
@@ -145,7 +149,8 @@ export class AgentLoopService {
         let loaded = await this.load(sessionId, runId);
         let { state, run } = loaded;
         if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
-        let request = buildModelRequest(state, this.context);
+        let prepared = await this.prepareRequest(state);
+        let request = prepared.request;
         if (this.contextPolicy) {
           const measurement = measureContext(state, request, this.contextPolicy);
           const trigger = compactionTrigger(measurement, this.contextPolicy);
@@ -154,7 +159,10 @@ export class AgentLoopService {
             loaded = await this.load(sessionId, runId);
             ({ state, run } = loaded);
             if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
-            if (compacted) request = buildModelRequest(state, this.context);
+            if (compacted) {
+              prepared = await this.prepareRequest(state);
+              request = prepared.request;
+            }
             else if (measurement.estimated_input_tokens >= measurement.hard_input_tokens) {
               return await this.finish(sessionId, runId, "failed", "limit_exceeded", control.signal);
             }
@@ -166,7 +174,10 @@ export class AgentLoopService {
         let requestId = "";
         for (let attempt = 1; ; attempt++) {
           this.checkControl(control.signal);
-          if (attempt > 1) request = buildModelRequest((await this.load(sessionId, runId)).state, this.context);
+          if (attempt > 1) {
+            prepared = await this.prepareRequest((await this.load(sessionId, runId)).state);
+            request = prepared.request;
+          }
           requestId = randomUUID();
           const correlation = { run_id: runId, step, request_id: requestId, attempt };
           const sanitizedStart = this.store.sanitizeEventInput(this.input(sessionId, "model.request.started", {
@@ -174,9 +185,11 @@ export class AgentLoopService {
           }));
           if (sanitizedStart.type !== "model.request.started") throw new StoreError("validation_failed", "Invalid model request start");
           request = sanitizedStart.data.request;
+          const requestState = (await this.load(sessionId, runId)).state;
+          const contextComposition = describeContextComposition(requestState, request, prepared.metadata, this.contextPolicy);
           const providerRequest = this.provider.describeRequest?.(request) ?? null;
           const start = parseEventInput({ ...sanitizedStart,
-            data: { ...sanitizedStart.data, provider_request: providerRequest } });
+            data: { ...sanitizedStart.data, context_composition: contextComposition, provider_request: providerRequest } });
           try { this.store.checkAppendSize([start], this.limits.maxRequestBytes); }
           catch (error) {
             if (!(error instanceof StoreError) || error.code !== "request_too_large") throw error;
@@ -230,8 +243,9 @@ export class AgentLoopService {
           this.checkControl(control.signal);
           if (result.status === "failed" && result.reason === "context_limit" && attempt === 1 && this.contextPolicy) {
             loaded = await this.load(sessionId, runId);
+            const overflowPrepared = await this.prepareRequest(loaded.state);
             const compacted = await this.compact(sessionId, runId, loaded,
-              buildModelRequest(loaded.state, this.context), "context_overflow", control.signal);
+              overflowPrepared.request, "context_overflow", control.signal);
             run = (await this.load(sessionId, runId)).run;
             if (run.cancelRequested) return await this.finishCancellation(sessionId, runId, control.signal);
             if (compacted) continue;
@@ -371,9 +385,12 @@ export class AgentLoopService {
     }));
     if (sanitizedStart.type !== "context.compaction.started") throw new StoreError("validation_failed", "Invalid compaction start");
     const compactionRequest = sanitizedStart.data.request;
+    const contextComposition = describeContextComposition(loaded.state, compactionRequest, {
+      prunedToolResults: plan.prunedToolResults, workspaceInstruction: null
+    }, this.contextPolicy);
     const providerRequest = this.provider.describeRequest?.(compactionRequest) ?? null;
     const started = parseEventInput({ ...sanitizedStart,
-      data: { ...sanitizedStart.data, provider_request: providerRequest } });
+      data: { ...sanitizedStart.data, context_composition: contextComposition, provider_request: providerRequest } });
     try { this.store.checkAppendSize([started], this.limits.maxRequestBytes); }
     catch (error) {
       if (error instanceof StoreError && error.code === "request_too_large") return false;
@@ -396,6 +413,7 @@ export class AgentLoopService {
         await this.store.append(this.input(sessionId, "context.compaction.succeeded", {
           ...common, summary: result.output.text, reasoning: result.output.reasoning, stop_reason: result.stop_reason,
           facts: plan.facts, shadowed_run_ids: plan.shadowedRunIds, shadowed_request_ids: plan.shadowedRequestIds,
+          shadowed_event_seqs: plan.shadowedEventSeqs, pruned_tool_results: plan.prunedToolResults,
           retained_tail_tokens: plan.retainedTailTokens, after, usage: result.usage, timings: result.timings,
           provider_response: result.provider_response ?? null, origin: "provider"
         }));
@@ -415,6 +433,17 @@ export class AgentLoopService {
       origin: result.origin === "provider" ? "provider" : "runner"
     }));
     return false;
+  }
+
+  private async prepareRequest(state: ExecutionState): Promise<{ request: ModelRequestContext; metadata: RequestContextMetadata }> {
+    if (!state.workspaceRoot) throw new StoreError("missing_workspace", "Model request requires a workspace root");
+    const base = buildModelRequest(state, this.context);
+    const workspace = await applyWorkspaceInstructions(base, state.workspaceRoot);
+    const pruned = pruneRequestToolResults(workspace.request);
+    return {
+      request: pruned.request,
+      metadata: { prunedToolResults: pruned.pruned, workspaceInstruction: workspace.observation }
+    };
   }
 
   private checkControl(signal: AbortSignal): void {

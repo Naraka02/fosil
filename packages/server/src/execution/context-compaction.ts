@@ -1,31 +1,19 @@
 import { createHash } from "node:crypto";
 import {
   modelRequestContextSchema,
-  type ContextFact, type ContextMeasurement, type Event, type ModelRequestContext
+  type ContextFact, type ContextMeasurement, type Event, type ModelRequestContext, type PrunedToolResult
 } from "@fosil/contracts";
 import { buildModelHistory, modelMessages, type ExecutionState, type ModelHistoryMessage } from "@fosil/core";
+import {
+  compactionTrigger, deepSeekContextPolicy, localTokenEstimate, measureContext, serializedBytes,
+  type ContextWindowPolicy
+} from "./context-measurement.js";
+import { pruneRequestToolResults } from "./request-context.js";
 
-export interface ContextWindowPolicy {
-  contextTokens: number;
-  executionOutputTokens: number;
-  safetyTokens: number;
-  proactiveRatio: number;
-  targetRatio: number;
-  retainRawTokens: number;
-  requestByteTrigger: number;
-  compactionOutputTokens: number;
-}
-
-export const deepSeekContextPolicy: Readonly<ContextWindowPolicy> = Object.freeze({
-  contextTokens: 1_000_000,
-  executionOutputTokens: 64_000,
-  safetyTokens: 32_000,
-  proactiveRatio: 0.7,
-  targetRatio: 0.35,
-  retainRawTokens: 160_000,
-  requestByteTrigger: 6 * 1024 * 1024,
-  compactionOutputTokens: 16_000
-});
+export {
+  compactionTrigger, deepSeekContextPolicy, localTokenEstimate, measureContext,
+  type ContextWindowPolicy
+} from "./context-measurement.js";
 
 export interface CompactionPlan {
   readonly source: { through_seq: number; event_count: number; sha256: string };
@@ -35,48 +23,14 @@ export interface CompactionPlan {
   readonly facts: readonly ContextFact[];
   readonly shadowedRunIds: readonly string[];
   readonly shadowedRequestIds: readonly string[];
+  readonly shadowedEventSeqs: readonly number[];
+  readonly prunedToolResults: readonly PrunedToolResult[];
   readonly retainedHistory: readonly ModelHistoryMessage[];
   readonly retainedTailTokens: number;
 }
 
-const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+const bytes = serializedBytes;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
-
-/** Conservative provider-neutral estimate, calibrated upward by any retained provider usage anchors. */
-export function localTokenEstimate(value: unknown): number {
-  const serialized = JSON.stringify(value);
-  let ascii = 0;
-  let nonAscii = 0;
-  for (const point of serialized) point.codePointAt(0)! <= 0x7f ? ascii++ : nonAscii++;
-  return Math.max(1, Math.ceil(ascii / 2 + nonAscii));
-}
-
-function calibration(state: ExecutionState): number {
-  let factor = 1;
-  for (const run of state.runs.values()) {
-    for (const request of run.requests.values()) {
-      if (request.usage?.input_tokens == null) continue;
-      factor = Math.max(factor, request.usage.input_tokens / localTokenEstimate(request.context) * 1.1);
-    }
-  }
-  return factor;
-}
-
-export function measureContext(state: ExecutionState, request: ModelRequestContext,
-  policy: ContextWindowPolicy = deepSeekContextPolicy): ContextMeasurement {
-  return {
-    estimated_input_tokens: Math.ceil(localTokenEstimate(request) * calibration(state)),
-    serialized_bytes: bytes(request),
-    hard_input_tokens: policy.contextTokens - policy.executionOutputTokens - policy.safetyTokens
-  };
-}
-
-export function compactionTrigger(measurement: ContextMeasurement,
-  policy: ContextWindowPolicy = deepSeekContextPolicy): "token_pressure" | "request_bytes" | null {
-  if (measurement.estimated_input_tokens >= Math.floor(measurement.hard_input_tokens * policy.proactiveRatio)) return "token_pressure";
-  if (measurement.serialized_bytes >= policy.requestByteTrigger) return "request_bytes";
-  return null;
-}
 
 function grouped(history: readonly ModelHistoryMessage[]): ModelHistoryMessage[][] {
   const groups: ModelHistoryMessage[][] = [];
@@ -116,7 +70,7 @@ function deterministicFacts(state: ExecutionState, selected: readonly ModelHisto
       facts.push({
         kind: message.name.includes("shell") ? "test_result" : "tool_outcome",
         text: clipped(JSON.stringify({ name: message.name, status: content.status, reason: content.reason,
-          exit_code: content.exit_code, execution: content.execution, error: content.error })),
+          exit_code: content.exit_code, execution: content.execution, result: content.result, error: content.error })),
         source_ids: [message.run_id, message.request_id, message.provider_call_id]
       });
       if (tool?.evidence?.kind === "file_change") {
@@ -147,8 +101,8 @@ function deterministicFacts(state: ExecutionState, selected: readonly ModelHisto
   const unique = new Map<string, ContextFact>();
   for (const fact of facts) unique.set(JSON.stringify(fact), fact);
   const priority: Record<ContextFact["kind"], number> = {
-    blocker: 0, constraint: 1, file_change: 2, test_result: 3,
-    objective: 4, tool_outcome: 5, next_action: 6
+    blocker: 0, constraint: 1, decision: 2, file_change: 3, test_result: 4,
+    objective: 5, tool_outcome: 6, next_action: 7
   };
   let retainedBytes = 0;
   const bounded: ContextFact[] = [];
@@ -201,7 +155,7 @@ export function buildCompactionPlan(state: ExecutionState, events: readonly Even
     }
   }
   const facts = deterministicFacts(state, selectedHistory);
-  const compactionRequest = modelRequestContextSchema.parse({
+  const rawCompactionRequest = modelRequestContextSchema.parse({
     provider: "deepseek-official", model: "deepseek-v4-flash",
     system_instructions: [
       "Summarize the supplied durable execution history for a coding agent. Preserve objectives, constraints, decisions, file changes, tool outcomes, tests, errors, blockers, and the next action. Do not invent facts. Return only the compact summary."
@@ -209,21 +163,37 @@ export function buildCompactionPlan(state: ExecutionState, events: readonly Even
     messages: modelMessages(selectedHistory), tools: [],
     settings: { temperature: null, top_p: null, max_output_tokens: policy.compactionOutputTokens, reasoning_effort: "low" }
   });
+  const compactedInput = pruneRequestToolResults(rawCompactionRequest);
+  const selectedRunIds = new Set(selectedHistory.filter((message) => message.role !== "system").map((message) => message.run_id));
+  const selectedRequestIds = new Set(selectedHistory.flatMap((message) =>
+    message.role === "assistant" || message.role === "tool" ? [message.request_id] : []));
+  const shadowedEventSeqs = events.filter((event) => {
+    if (!("run_id" in event.data) || !selectedRunIds.has(event.data.run_id)) return false;
+    if (event.type === "user.message") return selectedHistory.some((message) => message.role === "user" && message.run_id === event.data.run_id);
+    return "request_id" in event.data && selectedRequestIds.has(event.data.request_id);
+  }).map((event) => event.seq);
   const before = measureContext(state, fullRequest, policy);
   return {
     source: { through_seq: state.lastSeq, event_count: events.length, sha256: digest(events) },
     before, targetInputTokens: Math.floor(before.hard_input_tokens * policy.targetRatio),
-    request: compactionRequest, facts, shadowedRunIds: [...shadowedRunIds],
-    shadowedRequestIds: [...shadowedRequestIds], retainedHistory: retained.flat(), retainedTailTokens: retainedTokens
+    request: compactedInput.request, facts, shadowedRunIds: [...shadowedRunIds],
+    shadowedRequestIds: [...shadowedRequestIds], shadowedEventSeqs,
+    prunedToolResults: compactedInput.pruned, retainedHistory: retained.flat(), retainedTailTokens: retainedTokens
   };
 }
 
 export function projectedRequestAfterCompaction(plan: CompactionPlan, summary: string,
   template: ModelRequestContext): ModelRequestContext {
-  return modelRequestContextSchema.parse({
+  const workspaceMessages = template.messages.filter((message) => {
+    if (typeof message.content !== "object" || message.content === null || Array.isArray(message.content)) return false;
+    return message.content.kind === "workspace_instructions";
+  });
+  const projected = modelRequestContextSchema.parse({
     ...template,
-    messages: [{ role: "system", content: { kind: "context_checkpoint", summary, facts: plan.facts, source: plan.source } },
+    messages: [...workspaceMessages, { role: "system", content: { kind: "context_checkpoint", summary, facts: plan.facts,
+      source: { ...plan.source, shadowed_event_seqs: plan.shadowedEventSeqs, pruned_tool_results: plan.prunedToolResults } } },
       ...modelMessages(plan.retainedHistory)],
     tools: template.tools
   });
+  return pruneRequestToolResults(projected).request;
 }

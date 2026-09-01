@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Event, EventInput, ModelOutput, ModelRequestContext } from "@fosil/contracts";
 import { replay, workspaceBlockers } from "@fosil/core";
 import { AgentLoopService } from "./agent-loop.js";
+import { deepSeekContextPolicy } from "./context-compaction.js";
 import { ToolRegistry } from "./tool-registry.js";
 import { ModelProviderRequestError, type ModelProvider } from "../providers/model-provider.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
@@ -75,7 +76,8 @@ describe("agent loop context compaction", () => {
     expect(completed).toHaveLength(1);
     expect(completed[0]!.data).toMatchObject({
       trigger: "token_pressure", summary: "Older work completed and its durable outcome is retained.",
-      reasoning: "Compress the settled prefix.", shadowed_run_ids: [f.runId]
+      reasoning: "Compress the settled prefix.", shadowed_run_ids: [f.runId],
+      shadowed_event_seqs: expect.arrayContaining([3]), pruned_tool_results: []
     });
     expect(completed[0]!.data.facts).toEqual(expect.arrayContaining([
       expect.objectContaining({ kind: "file_change", text: expect.stringContaining("edit_file"),
@@ -225,6 +227,59 @@ async function expectStopped(pids: readonly number[]) {
     if (processState !== null) expect(["Z", "X"]).toContain(processState.slice(processState.lastIndexOf(")") + 2).split(" ")[0]);
   }
 }
+
+describe("agent loop request context", () => {
+  it("injects the root AGENTS.md snapshot, refreshes it on a later run, and records its composition", async () => {
+    const f = await fixture("Inspect repository guidance");
+    await writeFile(join(f.root, "AGENTS.md"), "Use the first repository rule.\n");
+    const p = provider(async function* (request, _signal, index) {
+      const workspace = request.messages.find((message) => typeof message.content === "object" && message.content !== null
+        && !Array.isArray(message.content) && message.content.kind === "workspace_instructions");
+      expect(workspace).toBeDefined();
+      expect(JSON.stringify(workspace?.content)).toContain(index === 0 ? "first repository rule" : "updated repository rule");
+      yield finish(index === 0 ? "first guidance observed" : "updated guidance observed");
+    });
+    const service = loop(f, p.adapter, { contextPolicy: deepSeekContextPolicy });
+    expect(await service.run(f.sessionId, f.runId)).toMatchObject({ status: "completed" });
+    await writeFile(join(f.root, "AGENTS.md"), "Use the updated repository rule.\n");
+    const next = await f.store.execute({ type: "run.submit", command_id: "updated-guidance",
+      session_id: f.sessionId, content: "Inspect the updated guidance" });
+    expect(await service.run(f.sessionId, next.run_id!)).toMatchObject({ status: "completed" });
+    const starts = await records(f, "model.request.started");
+    expect(starts).toHaveLength(2);
+    expect(starts.map((event) => event.data.context_composition?.contributions.find((item) =>
+      item.kind === "workspace_instructions"))).toEqual([
+      expect.objectContaining({ disposition: "included", item_count: 1 }),
+      expect.objectContaining({ disposition: "included", item_count: 1 })
+    ]);
+    expect(starts[0]!.data.context_composition?.measurement?.serialized_bytes).toBeGreaterThan(0);
+  });
+
+  it("sends an attributable preview of an oversized tool result while retaining the canonical result", async () => {
+    const f = await fixture("Read the large fixture");
+    const original = `begin-${"x".repeat(20_000)}-end\n`;
+    await writeFile(join(f.root, "target.txt"), original);
+    const p = provider(async function* (request, _signal, index) {
+      if (index === 0) yield finish("read", [read()]);
+      else {
+        const tool = request.messages.find((message) => message.role === "tool");
+        expect(tool).toMatchObject({ content: { result: { kind: "pruned_tool_result" } } });
+        expect(JSON.stringify(tool?.content)).toContain("begin-");
+        expect(JSON.stringify(tool?.content)).toContain("-end");
+        yield finish("large result inspected");
+      }
+    });
+    expect(await loop(f, p.adapter).run(f.sessionId, f.runId)).toMatchObject({ status: "completed" });
+    const toolResult = (await records(f, "tool.finished"))[0]!.data.result;
+    expect(JSON.stringify(toolResult)).toContain(original.slice(0, 100));
+    const second = (await records(f, "model.request.started"))[1]!;
+    expect(second.data.context_composition?.pruned_tool_results).toEqual([
+      expect.objectContaining({ tool_name: "read_file", original_chars: expect.any(Number), retained_chars: expect.any(Number) })
+    ]);
+    expect(second.data.context_composition!.pruned_tool_results[0]!.original_chars)
+      .toBeGreaterThan(second.data.context_composition!.pruned_tool_results[0]!.retained_chars);
+  });
+});
 
 describe("agent loop execution", () => {
   it("overlaps explicitly safe sibling tools and commits their results in model order", async () => {
