@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { eventSchema, type Event } from "@fosil/contracts";
-import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun } from "./chat-model.js";
+import { appendCanonicalEvent, EventSequenceError, projectChat, summarizeChatRun, summarizeChatRuns } from "./chat-model.js";
 
 const recorded_at = "2026-08-29T00:00:00.000Z";
 const usage = { input_tokens: 100, output_tokens: 20, total_tokens: 120, cache_read_tokens: 40, cache_write_tokens: 0 };
@@ -53,6 +53,8 @@ describe("Chat event projection", () => {
       ? `assistant:${activity.assistant.step}` : `tool:${activity.tool.step}:${String((activity.tool.result as { stdout: string }).stdout)}`))
       .toEqual(["assistant:1", "tool:1:x", "assistant:2"]);
     expect(summarizeChatRun(projected.runs[0]!)).toEqual({ steps: 2, modelCalls: 2, toolCalls: 1, llmDurationMs: 4, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 200, outputTokens: 40 });
+    const secondRun = { ...projected.runs[0]!, runId: "run-2", steps: [1], assistants: [{ ...projected.runs[0]!.assistants[0]!, runId: "run-2" }], tools: [], activities: [] };
+    expect(summarizeChatRuns([projected.runs[0]!, secondRun])).toEqual({ steps: 3, modelCalls: 3, toolCalls: 1, llmDurationMs: 6, toolDurationMs: 2, averageFirstTokenMs: 1, tokensPerSecond: 20_000, cacheHitRate: .4, inputTokens: 300, outputTokens: 60 });
   });
 
   it("deduplicates an identical delivery and rejects gaps, conflicts, and cross-session events", () => {

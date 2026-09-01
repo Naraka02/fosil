@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { ApprovalMode, DirectoryListing, SessionSummary } from "@fosil/contracts";
 import { CommandDeliveryError, configureProviderCredential, deleteSession, deleteWorkspace, loadDirectories, loadServiceStatus, sendCommand, type ServiceStatus } from "./api.js";
-import { projectChat, summarizeChatRun, type PendingApproval } from "./features/chat/chat-model.js";
+import { projectChat, summarizeChatRuns, type PendingApproval } from "./features/chat/chat-model.js";
 import { groupSessionsByWorkspace, workspaceName } from "./features/sessions/session-model.js";
 import { Markdown } from "./features/chat/Markdown.js";
 import { TraceView } from "./features/trace/TraceView.js";
@@ -75,8 +75,7 @@ export function App() {
   const permissionPickerRef = useRef<HTMLDivElement>(null);
   const { events, connection, streamError, clearStreamError } = useSessionStream(selectedId);
   const projection = useMemo(() => projectChat(events), [events]);
-  const latestRun = projection.runs.at(-1) ?? null;
-  const latestMetrics = latestRun ? summarizeChatRun(latestRun) : null;
+  const sessionMetrics = projection.runs.length ? summarizeChatRuns(projection.runs) : null;
   const latestRound = projection.runs.length;
   const activeRun = projection.runs.find((run) => run.runId === projection.activeRunId) ?? null;
   const effectiveApprovalMode = activeRun?.approvalMode ?? approvalMode;
@@ -196,17 +195,20 @@ export function App() {
 
   const composer = <form className="composer" onSubmit={submit}>
     <label className="sr-only" htmlFor="message">消息</label>
-    <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} placeholder={selected ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={2} />
+    <div className="composer-box"><textarea id="message" value={message} onChange={(event) => setMessage(event.target.value)} onKeyDown={(event) => {
+      if (event.key !== "Enter" || event.shiftKey || event.repeat || event.nativeEvent.isComposing) return;
+      event.preventDefault(); event.currentTarget.form?.requestSubmit();
+    }} placeholder={selected ? (freshSession ? "描述你想要构建的内容" : "给智能体发消息") : "请先创建会话"} disabled={!selected || !!projection.activeRunId || !!awaitingRun || uncertain} rows={2} />
       <div className="composer-footer"><span className="composer-context"><FolderIcon />{selected ? workspaceName(selected.workspace_root) : "尚未选择工作区"}</span><div className={`permission-picker permission-${effectiveApprovalMode}`} ref={permissionPickerRef}>
         <button className="permission-trigger" type="button" aria-label={`权限审批模式：${approvalModeLabel[effectiveApprovalMode]}`} aria-haspopup="menu" aria-expanded={permissionMenuOpen} title={approvalModeTitle[effectiveApprovalMode]} disabled={!!projection.activeRunId || !!awaitingRun || uncertain} onClick={() => setPermissionMenuOpen((current) => !current)}><PermissionIcon /><span>{approvalModeLabel[effectiveApprovalMode]}</span><ChevronIcon className={permissionMenuOpen ? "open" : ""} /></button>
         {permissionMenuOpen && <section className="permission-menu" role="menu" aria-label="选择权限审批模式"><header><div><strong>权限审批模式</strong><span>用于下一次运行</span></div><kbd>ESC</kbd></header><div className="permission-options">{approvalModes.map((mode) => <button key={mode} type="button" role="menuitemradio" aria-checked={approvalMode === mode} className={approvalMode === mode ? "selected" : ""} onClick={() => chooseApprovalMode(mode)}><span className={`permission-option-icon permission-option-${mode}`}><PermissionIcon /></span><span className="permission-option-copy"><strong>{approvalModeLabel[mode]}{mode === "full_access" && <em>高风险</em>}</strong><small>{approvalModeTitle[mode]}</small></span>{approvalMode === mode && <CheckIcon className="permission-check" />}</button>)}</div><footer>所选模式会持久化到运行记录与 Trace</footer></section>}
-      </div><span className="composer-hint">{projection.activeRunId ? "当前会话正在执行" : "持久事件模式"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
-      {latestRun && latestMetrics && <div className="composer-metrics" aria-label={`第 ${latestRound} 轮运行统计`} title="速度按输出 token 除以模型生成阶段耗时计算；缓存命中按缓存读取 token 除以输入 token 计算。">
-        <span><b>{latestRound}</b> 轮 <b>{latestMetrics.steps}</b> 步</span>
-        <span>LLM 调用 <b>{durationLabel(latestMetrics.llmDurationMs)}</b> 工具调用 <b>{durationLabel(latestMetrics.toolDurationMs)}</b></span>
-        <span>首 token 平均 <b>{durationLabel(latestMetrics.averageFirstTokenMs)}</b> <b>{rateLabel(latestMetrics.tokensPerSecond)}</b> tok/s</span>
-        <span>缓存命中 <b>{percentageLabel(latestMetrics.cacheHitRate)}</b></span>
-        <span>输入 <b>{tokenLabel(latestMetrics.inputTokens)}</b> tok 输出 <b>{tokenLabel(latestMetrics.outputTokens)}</b> tok</span>
+      </div><span className="composer-hint">{projection.activeRunId ? "当前会话正在执行" : "Enter 发送 · Shift+Enter 换行"}</span><button className="send-button" type="submit" aria-label="发送" disabled={!selected || !message.trim() || !!projection.activeRunId || !!awaitingRun || uncertain}><SendIcon /><span className="sr-only">{awaitingRun ? "已接收" : "发送"}</span></button></div>
+      {sessionMetrics && <div className="composer-metrics" aria-label={`当前 Session 共 ${latestRound} 轮、${sessionMetrics.steps} 步的累计运行统计`} title="所有指标均累计当前 Session 的全部轮次。速度按总输出 token 除以模型总生成阶段耗时计算；缓存命中按总缓存读取 token 除以总输入 token 计算。">
+        <span><b>{latestRound}</b> 轮 <b>{sessionMetrics.steps}</b> 步</span>
+        <span>LLM 调用 <b>{durationLabel(sessionMetrics.llmDurationMs)}</b> 工具调用 <b>{durationLabel(sessionMetrics.toolDurationMs)}</b></span>
+        <span>首 token 平均 <b>{durationLabel(sessionMetrics.averageFirstTokenMs)}</b> <b>{rateLabel(sessionMetrics.tokensPerSecond)}</b> tok/s</span>
+        <span>缓存命中 <b>{percentageLabel(sessionMetrics.cacheHitRate)}</b></span>
+        <span>输入 <b>{tokenLabel(sessionMetrics.inputTokens)}</b> tok 输出 <b>{tokenLabel(sessionMetrics.outputTokens)}</b> tok</span>
       </div>}
     </div>
   </form>;

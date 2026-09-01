@@ -268,8 +268,8 @@ svg { display: block; }
 .trace-tool-preview > span:not(.trace-tool-arrow) { min-width: 0; flex: 1 1 0; overflow: hidden; color: #9aa0a9; text-overflow: ellipsis; white-space: nowrap; }
 .trace-tool-arrow { flex: none; color: #78808b; font: 600 .67rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .trace-row-marker { position: absolute; top: 4px; left: 92px; z-index: 3; border: 1px solid; border-radius: 4px; padding: 2px 4px; font: 700 .45rem/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .035em; pointer-events: none; transform: translate(-50%,-50%); white-space: nowrap; box-shadow: 0 1px 2px rgba(35,42,53,.06); }
-.trace-turn-marker { border-color: #d5e1f6; background: #f7faff; color: #4b70bd; }
-.trace-request-marker { border-color: #ddd9ec; background: #faf9fd; color: #68648c; }
+.trace-turn-marker { border-color: #4f72ba; background: #5579c4; color: #fff; padding: 3px 6px; font-size: .49rem; box-shadow: 0 2px 5px rgba(55,83,141,.2); }
+.trace-request-marker { border-color: #e5e3eb; background: rgba(255,255,255,.96); color: #94919f; font-weight: 600; box-shadow: none; }
 .trace-saved { color: #7c8490; font-size: .58rem; white-space: nowrap; }
 .trace-filter-empty { margin: 0; border-bottom: 1px solid var(--line); color: var(--muted); padding: 18px; font-size: .72rem; text-align: center; }
 .trace-inspector { position: fixed; top: 78px; right: 0; bottom: 0; z-index: 45; width: min(760px,calc(100vw - 336px)); min-width: 0; border-left: 1px solid var(--line); background: #fff; box-shadow: -12px 0 35px rgba(26,31,40,.12); overflow: auto; }
@@ -443,6 +443,8 @@ svg { display: block; }
   .composer-metrics span + span::before { margin: 0 6px; }
   .trace-event { grid-template-columns: 76px minmax(0,1fr); min-height: 40px; }
   .trace-row-marker { left: 76px; font-size: .42rem; }
+  .trace-turn-marker { font-size: .45rem; }
+  .trace-request-marker { font-size: .39rem; }
   .trace-role { padding: 0 8px; font-size: .5rem; }
   .trace-event-line { gap: 7px; padding: 8px; }
   .trace-event-line > time { display: none; }

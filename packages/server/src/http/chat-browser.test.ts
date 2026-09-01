@@ -111,6 +111,9 @@ describe("product Chat controls in a real browser", () => {
     const releaseFirstFinish = gate();
     let calls = 0;
     let cancelledProviderCleaned = false;
+    const measuredFinish = (text: string, toolCalls: Array<{ provider_call_id: string; name: string; arguments: Record<string, string> }> = []) => ({
+      ...finish(text, toolCalls), usage: { input_tokens: 100, output_tokens: 20, total_tokens: 120, cache_read_tokens: 40, cache_write_tokens: 0 }
+    });
     const provider: ModelProvider = { async *stream(request, { signal }) {
       calls++;
       const prompt = promptOf(request);
@@ -118,20 +121,20 @@ describe("product Chat controls in a real browser", () => {
         if (!hasToolResult(request)) {
           yield { type: "delta", delta: { kind: "text", text: "Preparing the saved write." } };
           await releaseFirstFinish.promise;
-          yield finish("Preparing the saved write.", [{ provider_call_id: "write-marker", name: "shell", arguments: { command: "printf x >> browser-marker.txt" } }]);
-        } else yield finish("Marker written once.");
+          yield measuredFinish("Preparing the saved write.", [{ provider_call_id: "write-marker", name: "shell", arguments: { command: "printf x >> browser-marker.txt" } }]);
+        } else yield measuredFinish("Marker written once.");
         return;
       }
       if (prompt === "Deny the marker") {
-        if (!hasToolResult(request)) yield finish("Requesting denied write.", [{ provider_call_id: "deny-marker", name: "shell", arguments: { command: "printf y >> denied-marker.txt" } }]);
-        else yield finish("The denied write did not run.");
+        if (!hasToolResult(request)) yield measuredFinish("Requesting denied write.", [{ provider_call_id: "deny-marker", name: "shell", arguments: { command: "printf y >> denied-marker.txt" } }]);
+        else yield measuredFinish("The denied write did not run.");
         return;
       }
       if (prompt === "Cancel the wait") {
         try { await aborted(signal); } finally { cancelledProviderCleaned = true; }
         return;
       }
-      yield finish("Unexpected fixture prompt.");
+      yield measuredFinish("Unexpected fixture prompt.");
     } };
     const server = new ExecutionHttpServer({ store, webRoot, loop: { provider, providerId: "controlled-browser", model: "fixture", pollIntervalMs: 5, batchMs: 5 } });
     servers.push(server); const origin = await server.listen();
@@ -169,9 +172,13 @@ describe("product Chat controls in a real browser", () => {
     await page.keyboard.press("Escape");
     expect(await page.getByRole("menu", { name: "选择权限审批模式" }).count()).toBe(0);
     await page.setViewportSize({ width: 1280, height: 820 });
-    await page.getByLabel("消息").fill("Write the marker");
-    await page.getByRole("button", { name: "发送" }).click();
+    const composer = page.getByLabel("消息");
+    await page.getByText("Enter 发送 · Shift+Enter 换行", { exact: true }).waitFor();
+    await composer.fill("Draft line"); await composer.press("Shift+Enter");
+    expect(await composer.inputValue()).toBe("Draft line\n");
+    await composer.fill("Write the marker"); await composer.press("Enter");
     await page.getByText("Preparing the saved write.").waitFor();
+    expect(await composer.inputValue()).toBe("");
     expect(calls).toBe(1);
     await expect(readFile(join(root, "browser-marker.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     releaseFirstFinish.resolve();
@@ -191,7 +198,7 @@ describe("product Chat controls in a real browser", () => {
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByText("Marker written once.").waitFor();
     const firstMetrics = await page.locator(".composer-metrics").innerText();
-    expect(firstMetrics).toMatch(/1\s*轮\s*2\s*步/u); expect(firstMetrics).toContain("LLM 调用"); expect(firstMetrics).toContain("首 token 平均"); expect(firstMetrics.replace(/\s+/gu, " ")).toContain("输入 — tok 输出 — tok");
+    expect(firstMetrics).toMatch(/1\s*轮\s*2\s*步/u); expect(firstMetrics).toContain("LLM 调用"); expect(firstMetrics).toContain("首 token 平均"); expect(firstMetrics.replace(/\s+/gu, " ")).toContain("缓存命中 40.0%"); expect(firstMetrics.replace(/\s+/gu, " ")).toContain("输入 200 tok 输出 40 tok");
     expect(await page.getByRole("button", { name: "仅允许本次" }).count()).toBe(0);
     expect(await readFile(join(root, "browser-marker.txt"), "utf8")).toBe("x");
     expect(calls).toBe(2); expect(posts).toBe(3);
@@ -202,11 +209,15 @@ describe("product Chat controls in a real browser", () => {
     await page.getByRole("button", { name: "拒绝" }).click();
     await page.getByText("The denied write did not run.").waitFor();
     await page.locator("details.tool-row").filter({ hasText: "denied" }).waitFor();
+    const secondMetrics = await page.locator(".composer-metrics").innerText();
+    expect(secondMetrics).toMatch(/2\s*轮\s*4\s*步/u); expect(secondMetrics.replace(/\s+/gu, " ")).toContain("输入 400 tok 输出 80 tok");
     await expect(readFile(join(root, "denied-marker.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     expect(calls).toBe(4);
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.getByText("The denied write did not run.").waitFor();
     await page.locator("details.tool-row").filter({ hasText: "denied" }).waitFor();
+    const reopenedMetrics = await page.locator(".composer-metrics").innerText();
+    expect(reopenedMetrics).toMatch(/2\s*轮\s*4\s*步/u); expect(reopenedMetrics.replace(/\s+/gu, " ")).toContain("输入 400 tok 输出 80 tok");
     expect(await page.getByRole("button", { name: "拒绝" }).count()).toBe(0);
     expect(await page.getByRole("button", { name: "仅允许本次" }).count()).toBe(0);
     expect(calls).toBe(4); expect(posts).toBe(5);
@@ -267,6 +278,13 @@ describe("product Chat controls in a real browser", () => {
     expect(await page.locator(".trace-event").evaluateAll((items) => items.map((item) => item.getAttribute("data-kind")))).toEqual(["system", "user", "assistant", "tool", "assistant"]);
     expect(await page.locator(".trace-turn-marker").innerText()).toBe("TURN 1");
     expect(await page.locator(".trace-request-marker").allInnerTexts()).toEqual(["REQUEST 1", "REQUEST 2"]);
+    const markerHierarchy = await page.evaluate(() => {
+      const turn = getComputedStyle(document.querySelector<HTMLElement>(".trace-turn-marker")!);
+      const request = getComputedStyle(document.querySelector<HTMLElement>(".trace-request-marker")!);
+      return { turnBackground: turn.backgroundColor, requestBackground: request.backgroundColor, turnWeight: Number(turn.fontWeight), requestWeight: Number(request.fontWeight) };
+    });
+    expect(markerHierarchy.turnBackground).not.toBe(markerHierarchy.requestBackground);
+    expect(markerHierarchy.turnWeight).toBeGreaterThan(markerHierarchy.requestWeight);
     expect(await page.locator('.trace-event[data-kind="user"]').innerText()).not.toContain("TURN");
     expect(await page.locator('.trace-event[data-kind="assistant"]').first().innerText()).not.toContain("REQUEST");
     expect(await page.locator('.trace-event[data-kind="assistant"] .trace-event-preview').allInnerTexts()).toEqual(["Requesting managed edit.", "Target updated."]);
