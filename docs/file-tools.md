@@ -10,7 +10,7 @@ The [shared tool service](tool-execution.md) owns registry composition, normaliz
 
 ## Tools and retained results
 
-`fileToolDefinitions()` returns fresh JSON Schema definitions derived from the shared argument schemas for [context assembly](agent-loop.md#request-assembly-and-provider-boundary). Every provider-facing parameter schema has a root `type: object`, as required by the function-calling boundary. The `edit_file` wire schema describes both supported forms with optional alternative fields, while `parseFileToolInvocation` authoritatively rejects mixed or incomplete combinations. The exported schemas do not encode every runtime refinement, including the relative-path and single-line-query checks; provider schema acceptance alone does not validate or authorize a call.
+`fileToolDefinitions()` returns fresh JSON Schema definitions derived from the shared argument schemas for [context assembly](agent-loop.md#request-assembly-and-provider-boundary). Every provider-facing parameter schema has a root `type: object`, as required by the function-calling boundary. The `edit_file` wire schema describes both supported forms with optional alternative fields, while `parseFileToolInvocation` authoritatively rejects mixed or incomplete combinations. File-path property descriptions tell the model to use workspace-relative names and disclose the protected control directories before it calls a tool. These descriptions are guidance rather than JSON Schema enforcement: runtime parsing still owns relative-path and single-line-query refinements, and provider schema acceptance alone does not validate or authorize a call.
 
 | Tool | Behavior | Permission |
 | --- | --- | --- |

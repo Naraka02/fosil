@@ -61,7 +61,7 @@ describe("agent loop context compaction", () => {
       }
     });
     const service = loop(f, p.adapter, { contextPolicy: {
-      contextTokens: 10_000, executionOutputTokens: 100, safetyTokens: 100,
+      contextTokens: 10_500, executionOutputTokens: 100, safetyTokens: 100,
       proactiveRatio: 0.6, targetRatio: 0.59, retainRawTokens: 200,
       requestByteTrigger: 1024 * 1024, compactionOutputTokens: 100
     } });

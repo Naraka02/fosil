@@ -182,15 +182,16 @@ describe("file tool service", () => {
   });
 
   it.each([
-    ["unknown_tool", { path: "target.txt" }],
-    ["edit_file", { path: "target.txt", expected_sha256: "invalid", replacement: "bad" }],
-    ["read_file", { path: "../outside" }],
-    ["search_text", { path: "target.txt", query: "" }],
-    ["read_file", { path: "target.txt", unrecognized: true }]
-  ])("records invalid %s calls without approval or dispatch", async (name, args) => {
+    ["unknown_tool", { path: "target.txt" }, "unknown_tool", "tools supplied in the current model request"],
+    ["edit_file", { path: "target.txt", expected_sha256: "invalid", replacement: "bad" }, "invalid_arguments", "relative to the workspace"],
+    ["read_file", { path: "/absolute/outside" }, "invalid_arguments", "never absolute"],
+    ["read_file", { path: "../outside" }, "invalid_arguments", "relative to the workspace"],
+    ["search_text", { path: "target.txt", query: "" }, "invalid_arguments", "parameter schema"],
+    ["read_file", { path: "target.txt", unrecognized: true }, "invalid_arguments", "parameter schema"]
+  ])("records invalid %s calls without approval or dispatch", async (name, args, code, message) => {
     const f = await fixture(name as string, args as JsonValue);
     const result = finished(await f.advance());
-    expect(result.data).toMatchObject({ status: "failed", reason: "validation_failed", error: { code: "invalid_arguments" } });
+    expect(result.data).toMatchObject({ status: "failed", reason: "validation_failed", error: { code, message: expect.stringContaining(message) } });
     expect((await f.store.read(f.sessionId)).some((event) => ["approval.requested", "tool.started"].includes(event.type))).toBe(false);
   });
 

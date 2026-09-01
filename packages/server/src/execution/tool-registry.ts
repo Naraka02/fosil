@@ -27,6 +27,7 @@ export interface ToolExecutionContext {
 export interface ToolDefinition<T = unknown> {
   readonly schema: ModelRequestContext["tools"][number];
   parse(argumentsValue: JsonValue): T;
+  readonly invalidArgumentsMessage?: string;
   requiresApproval(mode: ApprovalMode, environment: { shellSandboxAvailable: boolean }): boolean;
   executionMode(argumentsValue: JsonValue): ToolExecutionMode;
   unexpectedFailure?: "known" | "uncertain";
@@ -37,6 +38,14 @@ export interface ToolDefinition<T = unknown> {
 export interface ResolvedTool<T = unknown> {
   readonly definition: ToolDefinition<T>;
   readonly parsed: T;
+}
+
+/** Bounded model-facing resolution feedback that never reflects raw argument values. */
+export class ToolResolutionError extends TypeError {
+  constructor(readonly code: "unknown_tool" | "invalid_arguments", message: string) {
+    super(message);
+    this.name = "ToolResolutionError";
+  }
 }
 
 function wireSchema(schema: { name: string; description?: string | null; parameters: unknown }): ModelRequestContext["tools"][number] {
@@ -87,8 +96,13 @@ export class ToolRegistry {
 
   resolve(name: string, argumentsValue: JsonValue): ResolvedTool {
     const definition = this.definitions.get(name);
-    if (!definition) throw new TypeError("Unknown tool");
-    return { definition, parsed: definition.parse(argumentsValue) };
+    if (!definition) throw new ToolResolutionError("unknown_tool",
+      "Unknown tool name; use one of the tools supplied in the current model request.");
+    try { return { definition, parsed: definition.parse(argumentsValue) }; }
+    catch {
+      throw new ToolResolutionError("invalid_arguments", definition.invalidArgumentsMessage
+        ?? `Invalid arguments for ${name}; follow the supplied parameter schema and descriptions.`);
+    }
   }
 
   async execute(resolved: ResolvedTool, context: ToolExecutionContext): Promise<RegisteredToolOutcome> {
@@ -103,6 +117,7 @@ function fileDefinitions(): ToolDefinition[] {
   return fileToolDefinitions().map((schema): ToolDefinition => ({
     schema: wireSchema(schema),
     parse: (argumentsValue) => parseFileToolInvocation({ name: schema.name, arguments: argumentsValue }),
+    invalidArgumentsMessage: `Invalid arguments for ${schema.name}. Follow its parameter schema; paths and search roots must be relative to the workspace (for example "docs/development.md"), never absolute, and direct file tools cannot access .git, .agents, or .codex.`,
     requiresApproval: (mode) => ["edit_file", "write_file"].includes(schema.name) && mode === "manual",
     executionMode: () => ["edit_file", "write_file"].includes(schema.name) ? "exclusive" : "parallel",
     unexpectedFailure: "known",
@@ -122,6 +137,7 @@ export function createBuiltinToolRegistry(): ToolRegistry {
   return new ToolRegistry([...fileDefinitions(), {
     schema: shellSchema,
     parse: (argumentsValue) => parseShellToolInvocation({ name: "shell", arguments: argumentsValue }),
+    invalidArgumentsMessage: "Invalid arguments for shell. Provide a non-empty command and, optionally, timeout_ms as an integer from 1 through 120000; no other fields are accepted.",
     requiresApproval: (mode, environment) => mode === "manual" || (mode === "workspace_write" && !environment.shellSandboxAvailable),
     executionMode: () => "exclusive",
     execute: async (parsed, context) => executeShellTool(context.workspace,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { JsonValue } from "@fosil/contracts";
-import { createBuiltinToolRegistry, ToolRegistry, type ToolDefinition } from "./tool-registry.js";
+import { createBuiltinToolRegistry, ToolRegistry, ToolResolutionError, type ToolDefinition } from "./tool-registry.js";
 
 function probeDefinition(parameters: JsonValue = { type: "object" }): ToolDefinition<{ id: string }> {
   return {
@@ -44,11 +44,32 @@ describe("tool registry", () => {
       "read_file", "search_text", "glob", "grep", "write_file", "edit_file", "shell"
     ]);
     for (const schema of schemas) expect(schema.parameters).toMatchObject({ type: "object" });
+    const readParameters = schemas.find((schema) => schema.name === "read_file")!.parameters as Record<string, unknown>;
+    expect(readParameters).toMatchObject({ properties: { path: {
+      description: expect.stringContaining("never absolute")
+    } } });
     expect(registry.executionMode("grep", { query: "needle" })).toBe("parallel");
     expect(registry.executionMode("edit_file", {
       path: "target.txt", expected_sha256: "0".repeat(64), old_text: "before", new_text: "after"
     })).toBe("exclusive");
     expect(registry.requiresApproval("write_file", "manual", true)).toBe(true);
     expect(registry.requiresApproval("write_file", "workspace_write", true)).toBe(false);
+  });
+
+  it("returns bounded actionable resolution failures without reflecting arguments", () => {
+    const registry = createBuiltinToolRegistry();
+    const secretPath = "/outside/private-value.txt";
+    expect(() => registry.resolve("read_file", { path: secretPath })).toThrow(ToolResolutionError);
+    try { registry.resolve("read_file", { path: secretPath }); }
+    catch (error) {
+      expect(error).toMatchObject({ code: "invalid_arguments" });
+      expect((error as Error).message).toContain("relative to the workspace");
+      expect((error as Error).message).not.toContain(secretPath);
+    }
+    try { registry.resolve("missing_tool", {}); }
+    catch (error) {
+      expect(error).toMatchObject({ code: "unknown_tool" });
+      expect((error as Error).message).toContain("tools supplied in the current model request");
+    }
   });
 });

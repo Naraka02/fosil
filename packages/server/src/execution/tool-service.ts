@@ -4,7 +4,7 @@ import { replay, type RunState, type ToolState } from "@fosil/core";
 import { FileToolError, ToolCancelled } from "../tools/file-tools.js";
 import { workspaceShellSandboxAvailable } from "../tools/shell-tools.js";
 import { SqliteWorkerStore, StoreError } from "../storage/store.js";
-import { createBuiltinToolRegistry, type ToolRegistry } from "./tool-registry.js";
+import { createBuiltinToolRegistry, ToolResolutionError, type ToolRegistry } from "./tool-registry.js";
 
 type Finished = Extract<Event, { type: "tool.finished" }>;
 type FinishedData = Finished["data"];
@@ -96,8 +96,12 @@ export class ToolService {
     if (approval?.status === "denied" || approval?.status === "expired") return finish({ status: "denied", reason: approval.status });
     let invocation;
     try { invocation = this.registry.resolve(call.toolName, call.arguments); }
-    catch {
-      return finish({ status: "failed", reason: "validation_failed", error: { code: "invalid_arguments", message: "Unknown tool or invalid arguments", details: null } });
+    catch (error) {
+      const resolution = error instanceof ToolResolutionError ? error : new ToolResolutionError("invalid_arguments",
+        "Tool arguments could not be validated; follow the supplied parameter schema and descriptions.");
+      return finish({ status: "failed", reason: "validation_failed", error: {
+        code: resolution.code, message: resolution.message, details: null
+      } });
     }
     if (call.requiresApproval && !approval) {
       const expiresAt = new Date(this.now().getTime() + this.ttl).toISOString();

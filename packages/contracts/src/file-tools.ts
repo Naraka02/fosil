@@ -3,7 +3,9 @@ import { z } from "zod";
 const relativeFile = z.string().min(1).max(4096).refine((path) =>
   !path.includes("\\") && !/[\x00-\x1f\x7f\uD800-\uDFFF]/u.test(path) && !/^[a-z]:/i.test(path)
   && path.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
-"expected a relative file path without traversal");
+"expected a relative file path without traversal").describe(
+  "Workspace-relative path (for example docs/development.md); never absolute; excludes .git, .agents, and .codex."
+);
 const readArguments = z.object({
   path: relativeFile,
   offset: z.number().int().min(1).optional(),
@@ -39,7 +41,9 @@ const directory = relativeFile.optional();
 const globPattern = z.string().min(1).max(512).refine((value) =>
   !value.includes("\\") && !/^[a-z]:/i.test(value) && !value.startsWith("/")
   && !/[\x00-\x1f\x7f\uD800-\uDFFF]/u.test(value)
-  && value.split("/").every((part) => part !== ".."), "expected a workspace-relative glob without traversal");
+  && value.split("/").every((part) => part !== ".."), "expected a workspace-relative glob without traversal").describe(
+  "Workspace-relative glob (for example src/**/*.ts); never absolute or parent-traversing."
+);
 const globArguments = z.object({ pattern: globPattern, path: directory, max_results: z.number().int().min(1).max(500).optional() }).strict();
 const grepArguments = z.object({
   query: z.string().min(1).max(256).refine((query) => !/[\r\n\0]/.test(query), "expected a single-line literal query"),
