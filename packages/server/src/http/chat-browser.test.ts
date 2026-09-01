@@ -131,6 +131,8 @@ describe("product Chat controls in a real browser", () => {
       await page.getByLabel("工作区路径").fill(workspaceRoot);
       await page.getByRole("button", { name: "使用此工作区", exact: true }).click();
       expect(await page.locator(".composer").count()).toBe(1);
+      await page.getByRole("button", { name: `切换新会话工作区，当前为 ${workspaceRoot.split("/").at(-1)!}`, exact: true }).waitFor();
+      await access(workspaceRoot);
       expect((await store.listSessions()).sessions).toHaveLength(0);
     };
     await chooseDraft(root);
@@ -139,7 +141,14 @@ describe("product Chat controls in a real browser", () => {
     await switchDraft(otherRoot);
     await switchDraft(root);
     await page.getByLabel("消息").fill("First saved session");
+    const sessionCreation = page.waitForResponse((response) => {
+      if (!response.url().endsWith("/api/commands") || response.request().method() !== "POST") return false;
+      try { return (response.request().postDataJSON() as { type?: unknown }).type === "session.create"; }
+      catch { return false; }
+    });
     await page.getByRole("button", { name: "发送" }).click();
+    const creationResponse = await sessionCreation;
+    expect(creationResponse.status(), await creationResponse.text()).toBe(200);
     await page.getByText("Saved reply.").waitFor();
     await expect.poll(async () => (await store.listSessions()).sessions.length).toBe(1);
 
@@ -189,7 +198,7 @@ describe("product Chat controls in a real browser", () => {
     await page.getByText(/还没有会话/u).waitFor();
     expect(await readFile(marker, "utf8")).toBe("preserved");
     expect(JSON.stringify(await store.listSessions())).not.toContain(secret);
-  }, 30_000);
+  }, 60_000);
 
   it("streams saved output and never resubmits or revives an approval across refresh", async () => {
     await access(join(webRoot, "index.html"));
